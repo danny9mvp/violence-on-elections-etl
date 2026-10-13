@@ -7,7 +7,7 @@ import os
 import sys
 from typing import List, Optional
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 from violence_etl import io as etl_io
 from violence_etl.db import make_engine
@@ -133,17 +133,34 @@ def cmd_run_all(settings: Settings, args: argparse.Namespace) -> int:
     return 0
 
 
+def _drop_alembic_version(engine) -> None:
+    """Remove the Alembic bookkeeping table so ``upgrade head`` replays.
+
+    ``Base.metadata.drop_all`` only knows ORM tables, so ``alembic_version``
+    survives it. Leaving it at ``head`` would make the following
+    ``command.upgrade(cfg, "head")`` a no-op and the database would be left
+    with no application tables.
+    """
+    with engine.begin() as conn:
+        conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
+
+
 def cmd_drop_db(settings: Settings, args: argparse.Namespace) -> int:
     if not args.yes:
         print("drop-db: refusing to run without --yes")
         return 2
     engine = make_engine(settings=settings)
     Base.metadata.drop_all(engine)
+    _drop_alembic_version(engine)
     print("drop-db: tables dropped")
     from alembic import command
 
     command.upgrade(_alembic_config(settings), "head")
-    print("drop-db: tables recreated")
+    print(
+        "drop-db: tables recreated ({0})".format(
+            ", ".join(sorted(Base.metadata.tables))
+        )
+    )
     return 0
 
 

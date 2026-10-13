@@ -133,14 +133,26 @@ def test_cli_init_db_and_run_all(tmp_path, monkeypatch, sample_csv, capsys):
     assert "validate: PASS" in out
 
 
-def test_cli_drop_db_requires_yes(tmp_path, monkeypatch):
+def test_cli_drop_db_requires_yes(tmp_path, monkeypatch, sample_csv):
+    from sqlalchemy import inspect
+
     from violence_etl.cli import main
+    from violence_etl.models import Base
 
     db_path = tmp_path / "cli2.db"
     base = ["--backend", "sqlite", "--sqlite-path", str(db_path)]
     assert main(base + ["init-db"]) == 0
     assert main(base + ["drop-db"]) == 2
     assert main(base + ["drop-db", "--yes"]) == 0
+
+    # drop-db must leave a fully recreated schema, not just alembic_version.
+    engine = make_engine("sqlite:///" + str(db_path))
+    try:
+        names = set(inspect(engine).get_table_names())
+    finally:
+        engine.dispose()
+    expected = set(Base.metadata.tables) | {"alembic_version"}
+    assert expected <= names, "missing after drop-db: {0}".format(expected - names)
 
 
 @pytest.mark.full_dataset
