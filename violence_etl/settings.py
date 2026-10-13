@@ -8,10 +8,11 @@ then takes precedence over the individual pieces.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 from dotenv import load_dotenv
+from sqlalchemy.engine import URL, make_url
 
 load_dotenv()
 
@@ -25,14 +26,14 @@ class Settings:
     pg_host: str
     pg_port: int
     pg_user: str
-    pg_password: str
+    pg_password: str = field(repr=False)
     pg_database: str
     sqlite_path: str
     source_url: str
     log_level: str
     dedup_mode: str       # "drop" | "sum"
     bronze_dir: str
-    database_url_override: Optional[str] = None
+    database_url_override: Optional[str] = field(default=None, repr=False)
 
 
 def _env(key: str, default: str) -> str:
@@ -70,12 +71,44 @@ def get_settings() -> Settings:
     )
 
 
+def database_url_object(settings: Optional[Settings] = None) -> URL:
+    """Build a :class:`sqlalchemy.engine.URL` without string interpolation.
+
+    Using ``URL.create`` keeps user and password as raw components, so
+    passwords containing ``@``, ``:``, ``/`` or ``%`` are never mistaken for
+    URL syntax. The object can be handed straight to ``create_engine`` or to an
+    Alembic ``Config`` (``cfg.attributes["sqlalchemy.url"]``), bypassing
+    ``ConfigParser`` interpolation which chokes on ``%``.
+    """
+    s = settings or get_settings()
+    if s.database_url_override:
+        return make_url(s.database_url_override)
+    if s.backend == "sqlite":
+        return URL.create("sqlite", database=s.sqlite_path)
+    return URL.create(
+        "postgresql+psycopg",
+        username=s.pg_user,
+        password=s.pg_password,
+        host=s.pg_host,
+        port=s.pg_port,
+        database=s.pg_database,
+    )
+
+
 def database_url(settings: Optional[Settings] = None) -> str:
+    """Render the connection URL as a string with the password visible.
+
+    A ``DATABASE_URL`` override is returned verbatim so it round-trips exactly.
+    """
     s = settings or get_settings()
     if s.database_url_override:
         return s.database_url_override
-    if s.backend == "sqlite":
-        return "sqlite:///" + s.sqlite_path
-    return "postgresql+psycopg://{u}:{p}@{h}:{port}/{d}".format(
-        u=s.pg_user, p=s.pg_password, h=s.pg_host, port=s.pg_port, d=s.pg_database
-    )
+    return database_url_object(s).render_as_string(hide_password=False)
+
+
+def database_url_display(settings: Optional[Settings] = None) -> str:
+    """Like :func:`database_url` but with the password masked for logging."""
+    s = settings or get_settings()
+    if s.database_url_override:
+        return make_url(s.database_url_override).render_as_string(hide_password=True)
+    return database_url_object(s).render_as_string(hide_password=True)

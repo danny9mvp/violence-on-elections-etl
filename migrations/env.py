@@ -3,26 +3,37 @@ from __future__ import annotations
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import create_engine, pool
 
 from violence_etl.models import Base
-from violence_etl.settings import database_url, get_settings
+from violence_etl.settings import database_url_object, get_settings
 
 config = context.config
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# Inject the runtime URL derived from environment variables.
-config.set_main_option("sqlalchemy.url", database_url(get_settings()))
+
+def _configured_url():
+    """Return the runtime URL.
+
+    The CLI passes a :class:`sqlalchemy.engine.URL` through
+    ``config.attributes`` so no value ever travels through ``ConfigParser``
+    (which interpolates ``%`` and breaks on such passwords). When Alembic is
+    driven directly, fall back to the environment-derived URL.
+    """
+    url = config.attributes.get("sqlalchemy.url")
+    if url is None:
+        url = database_url_object(get_settings())
+    return url
+
 
 target_metadata = Base.metadata
 
 
 def run_migrations_offline() -> None:
-    url = config.get_main_option("sqlalchemy.url")
     context.configure(
-        url=url,
+        url=_configured_url(),
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
@@ -33,11 +44,7 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    connectable = engine_from_config(
-        config.get_section(config.config_ini_section),
-        prefix="sqlalchemy.",
-        poolclass=pool.NullPool,
-    )
+    connectable = create_engine(_configured_url(), poolclass=pool.NullPool, future=True)
     with connectable.connect() as connection:
         context.configure(
             connection=connection,

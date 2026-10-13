@@ -24,7 +24,12 @@ from violence_etl.models import (
     SilverRejectedRows,
 )
 from violence_etl.pipeline import run_all, run_bronze, run_gold, run_silver
-from violence_etl.settings import Settings, database_url, get_settings
+from violence_etl.settings import (
+    Settings,
+    database_url_display,
+    database_url_object,
+    get_settings,
+)
 
 logger = logging.getLogger("violence_etl.cli")
 
@@ -46,7 +51,9 @@ def _alembic_config(settings: Settings):
 
     cfg = Config(os.path.join(REPO_ROOT, "alembic.ini"))
     cfg.set_main_option("script_location", os.path.join(REPO_ROOT, "migrations"))
-    cfg.set_main_option("sqlalchemy.url", database_url(settings))
+    # Pass a URL object through attributes. A string with "%" would be run
+    # through ConfigParser interpolation and raise ValueError.
+    cfg.attributes["sqlalchemy.url"] = database_url_object(settings)
     return cfg
 
 
@@ -54,7 +61,7 @@ def cmd_init_db(settings: Settings, args: argparse.Namespace) -> int:
     from alembic import command
 
     command.upgrade(_alembic_config(settings), "head")
-    print("init-db: migrations applied (url={0})".format(database_url(settings)))
+    print("init-db: migrations applied (url={0})".format(database_url_display(settings)))
     return 0
 
 
