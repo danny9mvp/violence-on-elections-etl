@@ -243,7 +243,9 @@ Goal: preserve the source verbatim and mirror it exactly, plus ingestion metadat
 Artifacts:
 1. Landing file: `data/bronze/landing/<sha256>.csv`, the exact downloaded bytes. Name is the content hash, so re-downloading identical content never writes a second file. Also write `data/bronze/raw/yi5j-5fe9_<utcstamp>.csv` as a run-stamped copy referenced by the ingestion log.
 2. Raw table `bronze_crimes_raw`: every source column stored as text, plus metadata columns.
-3. Ingestion log `bronze_ingestion_log`: one row per load attempt.
+3. Ingestion log `bronze_ingestion_log`: one row per source content hash,
+   updated in place on every attempt (`loaded` or `skipped`), so repeated runs
+   are idempotent. See README "Idempotency and reload semantics".
 
 ### Table definitions (SQLAlchemy classic column style, `violence_etl/models.py`)
 
@@ -290,9 +292,9 @@ Function `ingest_bronze(engine, settings, csv_path=None) -> dict`:
 1. If `csv_path` is None, download `settings.source_url` with `requests.get(..., allow_redirects=True, stream=True, timeout=120)` into memory, compute sha256, write landing file if absent, and write the run-stamped raw copy.
 2. Read the CSV with `pandas.read_csv(path, dtype=str, keep_default_na=False, quoting=csv.QUOTE_ALL)` so all fields stay text and empty strings stay empty strings (no NaN coercion).
 3. Assert the header equals the 7 expected names in order from `violence_etl/schema.py`; raise `SchemaError` on mismatch (fail fast, no partial load).
-4. Idempotency: look up `source_sha256` in `bronze_ingestion_log`. If a row with status `loaded` exists and `--force` is not set, log `skipped` and return `{"status": "skipped", ...}` without inserting raw rows.
+4. Idempotency: if `bronze_crimes_raw` already holds rows for this `source_sha256` and `--force` is not set, update the log row for that hash to `status="skipped"` and return `{"status": "skipped", ...}` without inserting raw rows.
 5. Otherwise delete any existing `bronze_crimes_raw` rows for this `source_sha256`, then bulk insert with the metadata columns. `load_ts` is `datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)` (naive UTC, works on 3.8 and 3.14).
-6. Insert a `bronze_ingestion_log` row with `status="loaded"` and the row count, commit in one transaction.
+6. Upsert the `bronze_ingestion_log` row for this hash (`UNIQUE(source_sha256)`) with `status="loaded"` and the row count, in one transaction.
 
 No cleaning happens here. Text stays text.
 
@@ -367,7 +369,7 @@ Function `build_silver(engine, settings, force=False) -> dict`:
 2. Apply R1..R8, splitting valid and rejected frames.
 3. Apply R9 dedup per `settings.dedup_mode`.
 4. Apply R11..R13.
-5. Idempotency: full deterministic refresh. If `force`, `DELETE FROM silver_crimes` and `DELETE FROM silver_rejected_rows` for this sha; otherwise use an upsert on the business-key unique constraint (`INSERT ... ON CONFLICT DO NOTHING` on PostgreSQL, `INSERT OR IGNORE` on SQLite) so re-running never duplicates. Since the unique constraint exists, a second identical run inserts zero rows.
+5. Idempotency: full deterministic refresh. If `force`, `DELETE FROM silver_crimes` and `DELETE FROM silver_rejected_rows` for this sha; otherwise use an upsert on the business-key unique constraint (`INSERT ... ON CONFLICT DO NOTHING` on PostgreSQL, `INSERT OR IGNORE` on SQLite) so re-running never duplicates. Since the unique constraint exists, a second identical run inserts zero rows. Delivered: silver keeps a single active snapshot: rows for any other `source_sha256` are purged first, so an updated export replaces the previous one and gold never mixes snapshots. `inserted_rows` is the insert rowcount; `silver_rows`/`total_crimes` are read back from the database.
 6. Insert rejected rows.
 7. Return counts: `{"raw_rows", "silver_rows", "rejected_rows", "dropped_duplicates", "total_crimes"}` and log them.
 
@@ -557,6 +559,8 @@ alembic history
 - `0001_bronze.py`: create `bronze_crimes_raw`, `bronze_ingestion_log`, and indexes.
 - `0002_silver.py`: create `silver_crimes`, `silver_rejected_rows`, unique constraint and indexes.
 - `0003_gold.py`: create the four `gold_*` tables.
+- `0004_bronze_ingestion_unique.py`: collapse legacy duplicate ingestion-log rows
+  and add `UNIQUE(source_sha256)`.
 
 Each migration has a working `downgrade`.
 

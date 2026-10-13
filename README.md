@@ -56,7 +56,10 @@ gitignored). `.env.example` lists them with the defaults.
 
 `DATABASE_URL` is honored verbatim when set; otherwise the URL is built from
 `ETL_DB_BACKEND` and the PG or SQLite variables. The PostgreSQL dialect is
-`postgresql+psycopg://` (psycopg 3).
+`postgresql+psycopg://` (psycopg 3). Credentials are assembled with
+`sqlalchemy.engine.URL.create` and handed to the engine and to Alembic as a URL
+object, so passwords containing `@`, `:`, `/` or `%` work and are never parsed
+by `ConfigParser`.
 
 ## Usage
 
@@ -94,7 +97,8 @@ Makefile aliases: `make install`, `make test`, `make lint`, `make init-db`,
   never edited) plus a run-stamped copy in `data/bronze/raw/`.
 - `bronze_crimes_raw`: every source field stored as text plus ingestion
   metadata (`source_url`, `source_file`, `source_sha256`, `load_ts`, `row_num`).
-- `bronze_ingestion_log`: one row per successful load.
+- `bronze_ingestion_log`: one row per source content hash, holding the outcome
+  (`loaded` or `skipped`) of the most recent attempt; reloads update that row.
 - `silver_crimes`: typed, trimmed, uppercased, code-preserving, deduplicated,
   validated, calendar-enriched rows.
 - `silver_rejected_rows`: every rejected row with a reason and its raw values.
@@ -105,10 +109,13 @@ Makefile aliases: `make install`, `make test`, `make lint`, `make init-db`,
 Silver applies, in order: strip whitespace; uppercase `departamento`,
 `municipio` and `zona`; keep `cod_depto`/`cod_muni` as zero-padded text
 (2 and 5 chars); parse `fecha_hecho` with the explicit `%d/%m/%Y` format;
-cast `cantidad` to integer; restrict `zona` to `URBANA`/`RURAL`; reject null or
-empty business fields; reject a `cod_depto` that is not the first two
-characters of `cod_muni`; then deduplicate. Every rejected row is written to
-`silver_rejected_rows` with a reason, so nothing is silently lost.
+cast `cantidad` to integer (fractional values such as `1.5` are rejected);
+restrict `zona` to `URBANA`/`RURAL`; reject null or empty business fields;
+reject a `cod_depto` that is not the first two characters of `cod_muni`; then
+deduplicate. Every empty value, including an empty code, is reported as
+`null_field`; the type rules only flag non-empty invalid values. Every rejected
+row is written to `silver_rejected_rows` with a reason, so nothing is silently
+lost.
 
 Deduplication is keyed on `(fecha_hecho, cod_depto, cod_muni, zona, cantidad)`,
 because `departamento` and `municipio` are functionally dependent on the codes.
@@ -200,10 +207,25 @@ The notebooks under `notebooks/` are meant to be run from PyCharm using the IDE
 Managed Jupyter server with the project `.venv` as the kernel. See
 `notebooks/README.md` for details.
 
-## Idempotency
+## Idempotency and reload semantics
 
-The pipeline is safe to run repeatedly. Bronze is keyed on the content sha256
-and re-downloading identical bytes is a no-op. Silver inserts use
-`ON CONFLICT DO NOTHING` (PostgreSQL) or `INSERT OR IGNORE` (SQLite), so a
-second load inserts zero rows. Gold is a full refresh. A second `run-all` on
-the same source logs `skipped` at bronze and changes no row counts.
+The pipeline is safe to run repeatedly.
+
+- Bronze is keyed on the content sha256. Re-reading identical bytes is a no-op:
+  the raw rows are left untouched and the single `bronze_ingestion_log` row for
+  that hash is updated in place with `status="skipped"`. `--force` reloads the
+  raw rows and updates the same log row with `status="loaded"`, so the log never
+  grows on repeated attempts.
+- Silver holds exactly one active snapshot: the rows for the active sha256. On
+  each run rows from any other sha256 are purged, then the current snapshot is
+  upserted (business-key conflicts are ignored). Loading an updated export
+  therefore replaces the previous one instead of mixing snapshots, and a second
+  run of the same export writes zero new rows. Reported counts come from the
+  database after the write: `inserted_rows` is the insert rowcount and
+  `silver_rows`/`total_crimes` are read back from the active snapshot.
+- `silver_rejected_rows` is rebuilt for the active sha256 on every run.
+- Gold is a full refresh (delete then aggregate-insert), so it always converges
+  to the same content and always reflects the single active snapshot.
+
+A second `run-all` on the same source logs `skipped` at bronze and changes no
+row counts in any table.
