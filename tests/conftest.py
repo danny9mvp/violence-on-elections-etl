@@ -61,3 +61,13 @@ def settings_sqlite(sqlite_engine, monkeypatch, tmp_path):
 @pytest.fixture
 def fixtures_dir():
     return os.path.join(os.path.dirname(__file__), "fixtures")
+
+
+@pytest.fixture
+def sample_csv(fixtures_dir):
+    return os.path.join(fixtures_dir, "yi5j-5fe9_sample.csv")
+
+
+@pytest.fixture
+def bad_csv(fixtures_dir):
+    return os.path.join(fixtures_dir, "yi5j-5fe9_bad.csv")
