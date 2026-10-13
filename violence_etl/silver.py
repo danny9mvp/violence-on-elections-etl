@@ -4,12 +4,11 @@ Cleaning rules R1..R13 are documented in docs/PLAN.md. The rule order is kept
 literal: R1 strip, R2 upper, R3 codes, R4 date, R5 cantidad, R6 zona, R7 null,
 R8 referential sanity, R9 dedup, R11..R13 enrichment.
 
-Type rules (R4/R5/R6) only flag *non-empty* invalid values. An empty cell is
+Type rules (R3/R4/R5/R6) only flag *non-empty* invalid values. An empty cell is
 left for R7 so it is reported as ``null_field`` rather than as a type error.
 """
 from __future__ import annotations
 
-import datetime
 import hashlib
 import json
 import logging
@@ -25,6 +24,7 @@ from violence_etl.errors import LoadError
 from violence_etl.models import SilverCrimes, SilverRejectedRows
 from violence_etl.periods import electoral_period
 from violence_etl.settings import Settings
+from violence_etl.timeutil import naive_utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -42,10 +42,6 @@ NULLABLE_CHECK_COLUMNS = [
     "zona",
     "cantidad",
 ]
-
-
-def _naive_utc_now() -> datetime.datetime:
-    return datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
 
 
 def _is_empty(series: pd.Series) -> pd.Series:
@@ -95,16 +91,22 @@ def _clean(frame: pd.DataFrame) -> pd.DataFrame:
     open_mask = pd.Series(True, index=df.index)
 
     # R3: codes must be numeric and fit the fixed widths; pad with zeros.
-    depto_ok = open_mask & df["cod_depto"].str.fullmatch(r"\d{1,2}").fillna(False)
+    # Empty cells are left for R7 so they are reported as null_field, matching
+    # the type rules: only non-empty invalid values are code errors.
+    depto_empty = _is_empty(df["cod_depto"])
+    depto_valid = df["cod_depto"].str.fullmatch(r"\d{1,2}").fillna(False)
     open_mask = _assign_reason(
-        df, open_mask, ~df["cod_depto"].str.fullmatch(r"\d{1,2}").fillna(False), "bad_cod_depto"
+        df, open_mask, ~depto_valid & ~depto_empty, "bad_cod_depto"
     )
+    depto_ok = open_mask & depto_valid
     df.loc[depto_ok, "cod_depto"] = df.loc[depto_ok, "cod_depto"].str.zfill(2)
 
-    muni_ok = open_mask & df["cod_muni"].str.fullmatch(r"\d{1,5}").fillna(False)
+    muni_empty = _is_empty(df["cod_muni"])
+    muni_valid = df["cod_muni"].str.fullmatch(r"\d{1,5}").fillna(False)
     open_mask = _assign_reason(
-        df, open_mask, ~df["cod_muni"].str.fullmatch(r"\d{1,5}").fillna(False), "bad_cod_muni"
+        df, open_mask, ~muni_valid & ~muni_empty, "bad_cod_muni"
     )
+    muni_ok = open_mask & muni_valid
     df.loc[muni_ok, "cod_muni"] = df.loc[muni_ok, "cod_muni"].str.zfill(5)
 
     # R4: explicit DD/MM/YYYY parsing; never let pandas infer.
@@ -115,11 +117,12 @@ def _clean(frame: pd.DataFrame) -> pd.DataFrame:
         df, open_mask, (parsed.isna() & ~date_empty), "bad_date"
     )
 
-    # R5: cantidad to integer; non numeric or negative is invalid.
+    # R5: cantidad to integer; non numeric, negative or fractional is invalid.
     numeric = pd.to_numeric(df["cantidad_raw_s"], errors="coerce")
     df["cantidad"] = numeric
     cantidad_empty = _is_empty(df["cantidad_raw_s"])
-    bad_cantidad = (numeric.isna() | (numeric < 0)) & ~cantidad_empty
+    non_integral = numeric.notna() & ((numeric % 1) != 0)
+    bad_cantidad = (numeric.isna() | (numeric < 0) | non_integral) & ~cantidad_empty
     open_mask = _assign_reason(df, open_mask, bad_cantidad, "bad_cantidad")
 
     # R6: zona must be URBANA or RURAL.
@@ -189,7 +192,7 @@ def _enrich(valid: pd.DataFrame, sha: str) -> pd.DataFrame:
         )
     ]
     df["source_sha256"] = sha
-    df["silver_loaded_at"] = _naive_utc_now()
+    df["silver_loaded_at"] = naive_utc_now()
     return df
 
 
@@ -266,7 +269,7 @@ def build_silver(
     enriched = _enrich(deduped, sha)
     silver_records = _silver_records(enriched)
 
-    loaded_at = _naive_utc_now()
+    loaded_at = naive_utc_now()
     rejected_records = []
     for rec in rejected.to_dict("records"):
         raw_values = {

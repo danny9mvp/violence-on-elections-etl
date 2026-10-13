@@ -125,6 +125,37 @@ def test_r8_depto_muni_mismatch_rejected(sqlite_engine, settings_sqlite, tmp_pat
     assert _reasons(sqlite_engine) == {"depto_muni_mismatch": 1}
 
 
+def test_empty_code_is_null_field_not_type_error(sqlite_engine, settings_sqlite, tmp_path):
+    # R3 must leave empty codes for R7 (docstring agreement).
+    path = _write(
+        tmp_path,
+        ['"15/06/2014","","ANTIOQUIA","05001","MEDELLIN","URBANA","1"\n'],
+    )
+    out = build_via(sqlite_engine, settings_sqlite, path)
+    assert out["rejected_rows"] == 1
+    assert _reasons(sqlite_engine) == {"null_field": 1}
+
+
+def test_empty_muni_code_is_null_field(sqlite_engine, settings_sqlite, tmp_path):
+    path = _write(
+        tmp_path,
+        ['"15/06/2014","05","ANTIOQUIA","","MEDELLIN","URBANA","1"\n'],
+    )
+    out = build_via(sqlite_engine, settings_sqlite, path)
+    assert out["rejected_rows"] == 1
+    assert _reasons(sqlite_engine) == {"null_field": 1}
+
+
+def test_fractional_cantidad_rejected(sqlite_engine, settings_sqlite, tmp_path):
+    path = _write(
+        tmp_path,
+        ['"15/06/2014","05","ANTIOQUIA","05001","MEDELLIN","URBANA","1.5"\n'],
+    )
+    out = build_via(sqlite_engine, settings_sqlite, path)
+    assert out["rejected_rows"] == 1
+    assert _reasons(sqlite_engine) == {"bad_cantidad": 1}
+
+
 def test_r9_three_identical_collapse_to_one(sqlite_engine, settings_sqlite, tmp_path):
     row = '"15/06/2014","05","ANTIOQUIA","05001","MEDELLIN","URBANA","1"\n'
     path = _write(tmp_path, [row, row, row])

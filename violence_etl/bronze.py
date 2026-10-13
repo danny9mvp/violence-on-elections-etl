@@ -5,7 +5,6 @@ ingestion metadata (content hash, source file/url, load timestamp, row order).
 """
 from __future__ import annotations
 
-import datetime
 import logging
 import os
 import time
@@ -19,12 +18,9 @@ from violence_etl import io as etl_io
 from violence_etl.models import BronzeCrimesRaw, BronzeIngestionLog
 from violence_etl.schema import COLUMN_MAP, validate_header
 from violence_etl.settings import Settings
+from violence_etl.timeutil import naive_utc_now
 
 logger = logging.getLogger(__name__)
-
-
-def _naive_utc_now() -> datetime.datetime:
-    return datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
 
 
 def _has_raw_rows(engine: Engine, sha: str) -> bool:
@@ -117,7 +113,7 @@ def ingest_bronze(
     validate_header(list(df.columns))
 
     if not force and _has_raw_rows(engine, sha):
-        skip_ts = _naive_utc_now()
+        skip_ts = naive_utc_now()
         with engine.begin() as conn:
             _upsert_ingestion_log(
                 conn,
@@ -140,7 +136,7 @@ def ingest_bronze(
             "raw_rows": 0,
         }
 
-    load_ts = _naive_utc_now()
+    load_ts = naive_utc_now()
     records = []
     for i, row in enumerate(df.to_dict("records"), start=1):
         rec = {
