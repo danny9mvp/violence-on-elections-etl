@@ -146,3 +146,65 @@ def test_gold_full_refresh_is_deterministic(sqlite_engine, settings_sqlite, samp
     assert first["grand_total"] == second["grand_total"] == 32
     dept_count = _scalar(sqlite_engine, select(func.count()).select_from(GoldCrimesByDepartment))
     assert int(dept_count) == 5
+
+
+def test_top5_truncates_when_more_departments_exist(
+    sqlite_engine, settings_sqlite, many_depts_csv
+):
+    ingest_bronze(sqlite_engine, settings_sqlite, csv_path=many_depts_csv)
+    build_silver(sqlite_engine, settings_sqlite)
+    out = build_gold(sqlite_engine)
+
+    # Seven departments in total, only the top five are kept.
+    assert out["gold_crimes_by_department"] == 7
+    assert out["gold_top5_departments"] == 5
+
+    with sqlite_engine.connect() as conn:
+        rows = conn.execute(
+            select(GoldTop5Departments).order_by(GoldTop5Departments.rank)
+        ).fetchall()
+    assert [r.rank for r in rows] == [1, 2, 3, 4, 5]
+    assert [r.departamento for r in rows] == [
+        "CAUCA",
+        "CALDAS",
+        "ANTIOQUIA",
+        "ATLANTICO",
+        "BOGOTA",
+    ]
+    assert [r.total_crimes for r in rows] == [7, 6, 5, 4, 3]
+
+
+def test_period_order_matches_expected_labels(sqlite_engine, settings_sqlite, sample_csv):
+    _prepare(sqlite_engine, settings_sqlite, sample_csv)
+    with sqlite_engine.connect() as conn:
+        actual = {
+            r.electoral_period: r.period_order
+            for r in conn.execute(select(GoldCrimesByElectoralPeriod))
+        }
+    assert actual == {
+        "post-electoral": 1,
+        "intermediate": 2,
+        "pre-electoral": 3,
+        "electoral": 4,
+    }
+
+
+def test_export_csv_branch_writes_all_files(
+    sqlite_engine, settings_sqlite, sample_csv, tmp_path
+):
+    import os
+
+    ingest_bronze(sqlite_engine, settings_sqlite, csv_path=sample_csv)
+    build_silver(sqlite_engine, settings_sqlite)
+    export_dir = tmp_path / "gold"
+    out = build_gold(sqlite_engine, export_csv=True, export_dir=str(export_dir))
+
+    assert out["grand_total"] == 32
+    for name in [
+        "gold_top5_departments.csv",
+        "gold_crimes_by_department.csv",
+        "gold_crimes_by_calendar.csv",
+        "gold_crimes_by_electoral_period.csv",
+    ]:
+        path = os.path.join(str(export_dir), name)
+        assert os.path.exists(path), name

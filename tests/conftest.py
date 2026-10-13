@@ -71,3 +71,8 @@ def sample_csv(fixtures_dir):
 @pytest.fixture
 def bad_csv(fixtures_dir):
     return os.path.join(fixtures_dir, "yi5j-5fe9_bad.csv")
+
+
+@pytest.fixture
+def many_depts_csv(fixtures_dir):
+    return os.path.join(fixtures_dir, "yi5j-5fe9_many_depts.csv")
