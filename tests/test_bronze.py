@@ -46,6 +46,13 @@ def test_reingest_same_sha_skips(sqlite_engine, settings_sqlite, sample_csv):
     assert second["status"] == "skipped"
     assert _count(sqlite_engine, BronzeCrimesRaw) == 40
     assert _count(sqlite_engine, BronzeIngestionLog) == 1
+    # The skip is logged on the single per-hash row.
+    with sqlite_engine.connect() as conn:
+        status, message = conn.execute(
+            select(BronzeIngestionLog.status, BronzeIngestionLog.message)
+        ).first()
+    assert status == "skipped"
+    assert "force" in message
 
 
 def test_force_reloads(sqlite_engine, settings_sqlite, sample_csv):
@@ -53,6 +60,18 @@ def test_force_reloads(sqlite_engine, settings_sqlite, sample_csv):
     out = ingest_bronze(sqlite_engine, settings_sqlite, csv_path=sample_csv, force=True)
     assert out["status"] == "loaded"
     assert _count(sqlite_engine, BronzeCrimesRaw) == 40
+
+
+def test_force_reload_does_not_grow_the_log(sqlite_engine, settings_sqlite, sample_csv):
+    ingest_bronze(sqlite_engine, settings_sqlite, csv_path=sample_csv)
+    ingest_bronze(sqlite_engine, settings_sqlite, csv_path=sample_csv, force=True)
+    ingest_bronze(sqlite_engine, settings_sqlite, csv_path=sample_csv, force=True)
+    assert _count(sqlite_engine, BronzeCrimesRaw) == 40
+    # One row per source hash: forced reloads update in place.
+    assert _count(sqlite_engine, BronzeIngestionLog) == 1
+    with sqlite_engine.connect() as conn:
+        status = conn.execute(select(BronzeIngestionLog.status)).scalar()
+    assert status == "loaded"
 
 
 def test_keep_default_na_keeps_empty_strings(sqlite_engine, settings_sqlite, bad_csv):

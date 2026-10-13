@@ -12,7 +12,7 @@ import time
 from typing import Dict, Optional
 
 import pandas as pd
-from sqlalchemy import delete, insert, select
+from sqlalchemy import delete, func, insert, select
 from sqlalchemy.engine import Engine
 
 from violence_etl import io as etl_io
@@ -27,15 +27,66 @@ def _naive_utc_now() -> datetime.datetime:
     return datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
 
 
-def _already_loaded(engine: Engine, sha: str) -> bool:
+def _has_raw_rows(engine: Engine, sha: str) -> bool:
+    """True when a snapshot for ``sha`` is already present in bronze.
+
+    Presence of the data, not the log status, is what makes a re-ingest a
+    no-op: the log row for a hash is updated in place, so its status reflects
+    only the most recent attempt.
+    """
     stmt = (
-        select(BronzeIngestionLog.ingestion_id)
-        .where(BronzeIngestionLog.source_sha256 == sha)
-        .where(BronzeIngestionLog.status == "loaded")
+        select(BronzeCrimesRaw.raw_id)
+        .where(BronzeCrimesRaw.source_sha256 == sha)
         .limit(1)
     )
     with engine.connect() as conn:
         return conn.execute(stmt).first() is not None
+
+
+def _upsert_ingestion_log(
+    conn,
+    *,
+    source_url: str,
+    source_file: str,
+    source_sha256: str,
+    row_count: int,
+    status: str,
+    message: Optional[str],
+    loaded_at: datetime.datetime,
+) -> None:
+    """Insert or update the single log row for ``source_sha256``."""
+    values = {
+        "source_url": source_url,
+        "source_file": source_file,
+        "source_sha256": source_sha256,
+        "row_count": row_count,
+        "status": status,
+        "message": message,
+        "loaded_at": loaded_at,
+    }
+    update_cols = {k: v for k, v in values.items() if k != "source_sha256"}
+    dialect = conn.dialect.name
+    if dialect == "sqlite":
+        from sqlalchemy.dialects.sqlite import insert as dialect_insert
+    elif dialect == "postgresql":
+        from sqlalchemy.dialects.postgresql import insert as dialect_insert
+    else:  # pragma: no cover - only sqlite/postgres are supported
+        dialect_insert = None
+
+    if dialect_insert is not None:
+        stmt = dialect_insert(BronzeIngestionLog).values(**values)
+        conn.execute(
+            stmt.on_conflict_do_update(
+                index_elements=["source_sha256"], set_=update_cols
+            )
+        )
+    else:  # pragma: no cover
+        conn.execute(
+            delete(BronzeIngestionLog).where(
+                BronzeIngestionLog.source_sha256 == source_sha256
+            )
+        )
+        conn.execute(insert(BronzeIngestionLog).values(**values))
 
 
 def ingest_bronze(
@@ -65,7 +116,19 @@ def ingest_bronze(
     df = etl_io.read_csv(landing)
     validate_header(list(df.columns))
 
-    if not force and _already_loaded(engine, sha):
+    if not force and _has_raw_rows(engine, sha):
+        skip_ts = _naive_utc_now()
+        with engine.begin() as conn:
+            _upsert_ingestion_log(
+                conn,
+                source_url=settings.source_url,
+                source_file=source_file,
+                source_sha256=sha,
+                row_count=int(len(df)),
+                status="skipped",
+                message="already loaded; use --force to reload",
+                loaded_at=skip_ts,
+            )
         logger.info(
             "bronze: sha256=%s already loaded, skipping (use --force to reload)", sha
         )
@@ -99,16 +162,15 @@ def ingest_bronze(
         )
         if records:
             conn.execute(insert(BronzeCrimesRaw), records)
-        conn.execute(
-            insert(BronzeIngestionLog).values(
-                source_url=settings.source_url,
-                source_file=source_file,
-                source_sha256=sha,
-                row_count=len(records),
-                status="loaded",
-                message=None,
-                loaded_at=load_ts,
-            )
+        _upsert_ingestion_log(
+            conn,
+            source_url=settings.source_url,
+            source_file=source_file,
+            source_sha256=sha,
+            row_count=len(records),
+            status="loaded",
+            message=None,
+            loaded_at=load_ts,
         )
 
     elapsed = time.time() - started
@@ -129,11 +191,16 @@ def ingest_bronze(
 
 
 def latest_loaded_sha(engine: Engine) -> Optional[str]:
-    """Return the sha256 of the most recent successful load, if any."""
+    """Return the sha256 of the most recently loaded snapshot.
+
+    Derived from the raw rows themselves (highest ``raw_id``) rather than the
+    ingestion log, whose status reflects the latest attempt and may be
+    ``skipped``.
+    """
     stmt = (
-        select(BronzeIngestionLog.source_sha256)
-        .where(BronzeIngestionLog.status == "loaded")
-        .order_by(BronzeIngestionLog.loaded_at.desc(), BronzeIngestionLog.ingestion_id.desc())
+        select(BronzeCrimesRaw.source_sha256)
+        .group_by(BronzeCrimesRaw.source_sha256)
+        .order_by(func.max(BronzeCrimesRaw.raw_id).desc())
         .limit(1)
     )
     with engine.connect() as conn:
