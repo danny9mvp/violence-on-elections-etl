@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Virtualenv
+.venv/
+venv/
+env/
+
+# PyCharm
+.idea/
+*.iml
+out/
+
+# Env
+.env
+
+# Data artifacts
+data/bronze/landing/*.csv
+data/bronze/raw/*.csv
+data/silver/*
+data/gold/*
+!data/**/.gitkeep
+*.db
+*.sqlite
+*.sqlite3
+
+# Jupyter
+.ipynb_checkpoints/
+.jupyter/
+
+# OS
+.DS_Store
+
+# Agent tooling
+.opencode/

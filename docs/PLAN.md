@@ -1,0 +1,730 @@
+# Implementation Plan: Violence on Elections ETL (Medallion)
+
+## Context and verified source facts
+
+Source: `http://www.datos.gov.co/api/v3/views/yi5j-5fe9/export.csv` (Socrata export, follows a 301 redirect; must use `requests` with `allow_redirects=True` or curl `-L`).
+
+Facts confirmed by direct inspection of the downloaded file during planning:
+
+- Plain CSV, comma separated, every field quoted, 976,021 bytes.
+- Header exactly: `"FECHA HECHO","COD_DEPTO","DEPARTAMENTO","COD_MUNI","MUNICIPIO","ZONA","CANTIDAD"`.
+- 15,696 data rows.
+- `FECHA HECHO` is `DD/MM/YYYY`, not ISO.
+- `COD_DEPTO` is always 2 chars, `COD_MUNI` is always 5 chars, both zero padded, must stay text.
+- `ZONA` values: `URBANA` (9,813) and `RURAL` (5,883).
+- `CANTIDAD` is always the literal `1` in every row.
+- 32 distinct departments, 777 distinct municipality codes.
+- Date range min `2003-01-01`, max `2026-08-31`; rows arrive in descending date order.
+- 14,212 distinct full rows; 1,484 rows are exact duplicates (largest duplicate group has 24 copies). Total `CANTIDAD` over all rows is 15,696; over deduplicated rows it is 14,212.
+- No empty cells in the sample. Nulls and unparseable dates are still validated by design.
+
+## Target runtime and dependency strategy (Python 3.8 to 3.14)
+
+The stack must import and run on both Python 3.8 and Python 3.14 from one source tree. Code rules:
+
+- Add `from __future__ import annotations` at the top of every module that uses annotations.
+- Never use `match`, PEP 604 `X | Y`, builtin generics (`list[str]`, `dict[str, int]`) in runtime-evaluated positions, `dict |` union operators, or removed stdlib APIs (`distutils`, `imp`, `asyncio.coroutine`, positional `collections.namedtuple` defaults, etc.).
+- Use `typing.List`, `typing.Optional`, `typing.Dict`, `typing.Tuple` in signatures.
+- Use SQLAlchemy classic `Column(...)` declarative style, not `Mapped[...]` / `mapped_column`, to avoid runtime annotation evaluation differences across 3.8 and 3.14.
+- `datetime.UTC` does not exist on 3.8; use `datetime.timezone.utc`. `datetime.date.fromisocalendar` exists since 3.8 (ok). `zoneinfo` is 3.9+; avoid it.
+
+One dependency cannot span 3.8 to 3.14 with a single pin: pandas (and its numpy build). pandas 2.0.3 is the last release that installs on 3.8 but it has no CPython 3.13 or 3.14 wheels; pandas 2.3.3 has 3.9 to 3.14 wheels (including cp314) but requires >=3.9. Fix: environment markers in `requirements.txt`. Same pattern needed for numpy, psycopg2-binary, pytest, python-dotenv, requests, and the Jupyter dev stack. PostgreSQL driver uses psycopg 3 (`psycopg==3.2.10` with `psycopg-binary==3.2.10`, which has cp38 through cp314 wheels), dialect URL `postgresql+psycopg://`, avoiding psycopg2-binary which has no cp314 wheel at any 3.8-compatible version.
+
+### requirements.txt (runtime, pinned, with markers)
+
+```
+# Core
+SQLAlchemy==2.0.44
+alembic==1.14.1
+
+# PostgreSQL driver (psycopg 3, cp38..cp314 wheels)
+psycopg==3.2.10
+psycopg-binary==3.2.10
+
+# Data manipulation, split by interpreter range because no single pin spans 3.8..3.14
+numpy==1.24.4; python_version < "3.9"
+pandas==2.0.3; python_version < "3.9"
+numpy==2.0.2; python_version >= "3.9" and python_version < "3.11"
+pandas==2.3.3; python_version >= "3.9"
+numpy==2.3.2; python_version >= "3.11"
+
+# HTTP, config, utils
+requests==2.31.0
+python-dotenv==1.0.1
+```
+
+Notes:
+- SQLAlchemy 2.0.44 declares `>=3.7` and ships cp38..cp313 wheels plus a `py3-none-any` fallback, so it installs on 3.14 via the pure-Python wheel.
+- alembic 1.14.1 declares `>=3.8` and is pure Python (`py3-none-any`), so it spans the whole range. Do not use alembic >=1.16 (requires >=3.9).
+- pytest is deliberately excluded from runtime requirements and lives in the dev file.
+
+### requirements-dev.txt
+
+```
+-r requirements.txt
+pytest==8.3.5
+pytest-cov==5.0.0; python_version < "3.9"
+pytest-cov==6.2.1; python_version >= "3.9"
+coverage==7.6.1; python_version < "3.9"
+coverage==7.10.6; python_version >= "3.9"
+
+# Exploratory notebooks (PyCharm managed Jupyter server)
+jupyterlab==4.0.13; python_version < "3.9"
+jupyterlab==4.4.9; python_version >= "3.9"
+notebook==7.0.7; python_version < "3.9"
+notebook==7.4.7; python_version >= "3.9"
+ipykernel==6.29.5; python_version < "3.9"
+ipykernel==6.30.1; python_version >= "3.9"
+```
+
+A `requirements-dev.txt` is warranted: tests, coverage, and the notebook runtime are needed for development and CI but not to run the pipeline, and the notebook stack is heavy and must not leak into the production image.
+
+Install commands:
+
+```
+python -m venv .venv
+.venv/bin/python -m pip install --upgrade pip
+.venv/bin/python -m pip install -r requirements-dev.txt
+```
+
+## Repository layout
+
+Plain top-level package (no `src/` layout) so `python -m violence_etl.cli ...` works on both interpreters with no editable install step.
+
+```
+ViolenceOnElectionsEtl/
+├── .gitignore
+├── .env.example
+├── README.md
+├── requirements.txt
+├── requirements-dev.txt
+├── pyproject.toml                 # only [tool.pytest.ini_options] + [tool.ruff]
+├── alembic.ini
+├── Makefile                       # thin task aliases
+├── docs/
+│   └── PLAN.md
+├── migrations/                    # alembic root
+│   ├── env.py
+│   ├── script.py.mako
+│   └── versions/
+│       ├── 0001_bronze.py
+│       ├── 0002_silver.py
+│       └── 0003_gold.py
+├── violence_etl/
+│   ├── __init__.py
+│   ├── settings.py                # single env-driven config module
+│   ├── logging_conf.py
+│   ├── db.py                      # engine + session factory
+│   ├── models.py                  # SQLAlchemy Base + all tables
+│   ├── schema.py                  # expected CSV header + column contract
+│   ├── io.py                      # download, hash, read CSV
+│   ├── periods.py                 # electoral period mapper + ELECTION_YEARS
+│   ├── bronze.py                  # bronze ingestion
+│   ├── silver.py                  # curation + dedup + validation
+│   ├── gold.py                    # denormalized builders
+│   ├── pipeline.py                # orchestration (run_bronze/silver/gold/run_all)
+│   └── cli.py                     # argparse entry point
+├── data/
+│   ├── bronze/
+│   │   ├── landing/.gitkeep       # verbatim source files, named by sha256
+│   │   └── raw/.gitkeep           # copied curated raw snapshot per run
+│   ├── silver/.gitkeep            # optional parquet/csv exports
+│   ├── gold/.gitkeep              # optional csv exports
+│   └── warehouse/.gitkeep         # sqlite db files (gitignored)
+├── notebooks/
+│   ├── 01_bronze_profiling.ipynb
+│   ├── 02_silver_validation.ipynb
+│   └── 03_gold_analysis.ipynb
+└── tests/
+    ├── conftest.py
+    ├── fixtures/
+    │   ├── yi5j-5fe9_sample.csv       # small hand-built sample (committed)
+    │   └── yi5j-5fe9_bad.csv          # nulls + bad dates (committed)
+    ├── test_settings.py
+    ├── test_periods.py
+    ├── test_schema.py
+    ├── test_bronze.py
+    ├── test_silver.py
+    ├── test_gold.py
+    └── test_pipeline_sqlite.py
+```
+
+Where things live:
+- Raw landing originals: `data/bronze/landing/<sha256>.csv` (verbatim bytes, never edited).
+- Raw table mirror: `bronze_crimes_raw` in the warehouse DB, all source fields stored as text.
+- Curated table: `silver_crimes`.
+- Rejected rows: `silver_rejected_rows`.
+- Denormalized query objects: `gold_*` tables.
+- Code: `violence_etl/`.
+- Migrations: `migrations/`.
+- Tests: `tests/`.
+- Notebooks: `notebooks/`.
+- Config: `violence_etl/settings.py` plus `.env`.
+
+One codebase, two databases: use table-name prefixes (`bronze_`, `silver_`, `gold_`) rather than PostgreSQL schemas, because SQLite has no schemas. This keeps a single set of SQLAlchemy models and one Alembic history working identically on SQLite (staging/tests) and PostgreSQL (warehouse).
+
+## Settings module (single env-driven config)
+
+`violence_etl/settings.py`:
+
+```python
+from __future__ import annotations
+import os
+from dataclasses import dataclass
+from typing import Optional
+from dotenv import load_dotenv
+
+load_dotenv()
+
+@dataclass(frozen=True)
+class Settings:
+    backend: str          # "postgres" | "sqlite"
+    pg_host: str
+    pg_port: int
+    pg_user: str
+    pg_password: str
+    pg_database: str
+    sqlite_path: str
+    source_url: str
+    log_level: str
+    dedup_mode: str       # "drop" | "sum"
+    bronze_dir: str
+
+def _env(key: str, default: str) -> str:
+    return os.environ.get(key, default)
+
+def get_settings() -> Settings:
+    backend = _env("ETL_DB_BACKEND", "postgres").strip().lower()
+    return Settings(
+        backend=backend,
+        pg_host=_env("PGHOST", "localhost"),
+        pg_port=int(_env("PGPORT", "5432")),
+        pg_user=_env("PGUSER", "postgres"),
+        pg_password=_env("PGPASSWORD", "postgres"),
+        pg_database=_env("PGDATABASE", "violence"),
+        sqlite_path=_env("ETL_SQLITE_PATH", "data/warehouse/violence_staging.db"),
+        source_url=_env("ETL_SOURCE_URL", "http://www.datos.gov.co/api/v3/views/yi5j-5fe9/export.csv"),
+        log_level=_env("ETL_LOG_LEVEL", "INFO"),
+        dedup_mode=_env("ETL_DEDUP_MODE", "drop"),
+        bronze_dir=_env("ETL_BRONZE_DIR", "data/bronze"),
+    )
+
+def database_url(settings: Optional[Settings] = None) -> str:
+    s = settings or get_settings()
+    if s.backend == "sqlite":
+        return "sqlite:///" + s.sqlite_path
+    return "postgresql+psycopg://{u}:{p}@{h}:{port}/{d}".format(
+        u=s.pg_user, p=s.pg_password, h=s.pg_host, port=s.pg_port, d=s.pg_database
+    )
+```
+
+Env vars and defaults (defaults match the required credentials):
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `ETL_DB_BACKEND` | `postgres` | `postgres` or `sqlite` |
+| `PGHOST` | `localhost` | warehouse host |
+| `PGPORT` | `5432` | warehouse port |
+| `PGUSER` | `postgres` | warehouse user |
+| `PGPASSWORD` | `postgres` | warehouse password |
+| `PGDATABASE` | `violence` | warehouse database |
+| `ETL_SQLITE_PATH` | `data/warehouse/violence_staging.db` | staging/test sqlite file |
+| `ETL_SOURCE_URL` | the Socrata export URL | download source |
+| `ETL_LOG_LEVEL` | `INFO` | root log level |
+| `ETL_DEDUP_MODE` | `drop` | `drop` or `sum` duplicate policy |
+| `ETL_BRONZE_DIR` | `data/bronze` | landing/raw root |
+
+`.env.example` contains these keys with the defaults above; `.env` is gitignored.
+
+## Bronze layer
+
+Goal: preserve the source verbatim and mirror it exactly, plus ingestion metadata.
+
+Artifacts:
+1. Landing file: `data/bronze/landing/<sha256>.csv`, the exact downloaded bytes. Name is the content hash, so re-downloading identical content never writes a second file. Also write `data/bronze/raw/yi5j-5fe9_<utcstamp>.csv` as a run-stamped copy referenced by the ingestion log.
+2. Raw table `bronze_crimes_raw`: every source column stored as text, plus metadata columns.
+3. Ingestion log `bronze_ingestion_log`: one row per load attempt.
+
+### Table definitions (SQLAlchemy classic column style, `violence_etl/models.py`)
+
+```python
+Base = declarative_base()
+
+class BronzeCrimesRaw(Base):
+    __tablename__ = "bronze_crimes_raw"
+    __table_args__ = (
+        UniqueConstraint("source_sha256", "row_num", name="uq_bronze_source_row"),
+    )
+    raw_id = Column(Integer, primary_key=True, autoincrement=True)
+    source_sha256 = Column(String(64), nullable=False, index=True)
+    source_file = Column(String(255), nullable=False)
+    source_url = Column(String(512), nullable=False)
+    load_ts = Column(DateTime(timezone=False), nullable=False)
+    row_num = Column(Integer, nullable=False)          # 1-based data row order
+    fecha_hecho_raw = Column(Text, nullable=True)       # verbatim "FECHA HECHO"
+    cod_depto_raw = Column(Text, nullable=True)
+    departamento_raw = Column(Text, nullable=True)
+    cod_muni_raw = Column(Text, nullable=True)
+    municipio_raw = Column(Text, nullable=True)
+    zona_raw = Column(Text, nullable=True)
+    cantidad_raw = Column(Text, nullable=True)
+
+class BronzeIngestionLog(Base):
+    __tablename__ = "bronze_ingestion_log"
+    ingestion_id = Column(Integer, primary_key=True, autoincrement=True)
+    source_url = Column(String(512), nullable=False)
+    source_file = Column(String(255), nullable=False)
+    source_sha256 = Column(String(64), nullable=False, index=True)
+    row_count = Column(Integer, nullable=False)
+    status = Column(String(16), nullable=False)         # "loaded" | "skipped" | "failed"
+    message = Column(Text, nullable=True)
+    loaded_at = Column(DateTime(timezone=False), nullable=False)
+```
+
+`String(64)`, `String(255)`, `Text` are used (not `String` without length) so the schema renders identically on SQLite and PostgreSQL.
+
+### Bronze ingestion behavior (`violence_etl/bronze.py`)
+
+Function `ingest_bronze(engine, settings, csv_path=None) -> dict`:
+
+1. If `csv_path` is None, download `settings.source_url` with `requests.get(..., allow_redirects=True, stream=True, timeout=120)` into memory, compute sha256, write landing file if absent, and write the run-stamped raw copy.
+2. Read the CSV with `pandas.read_csv(path, dtype=str, keep_default_na=False, quoting=csv.QUOTE_ALL)` so all fields stay text and empty strings stay empty strings (no NaN coercion).
+3. Assert the header equals the 7 expected names in order from `violence_etl/schema.py`; raise `SchemaError` on mismatch (fail fast, no partial load).
+4. Idempotency: look up `source_sha256` in `bronze_ingestion_log`. If a row with status `loaded` exists and `--force` is not set, log `skipped` and return `{"status": "skipped", ...}` without inserting raw rows.
+5. Otherwise delete any existing `bronze_crimes_raw` rows for this `source_sha256`, then bulk insert with the metadata columns. `load_ts` is `datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)` (naive UTC, works on 3.8 and 3.14).
+6. Insert a `bronze_ingestion_log` row with `status="loaded"` and the row count, commit in one transaction.
+
+No cleaning happens here. Text stays text.
+
+## Silver layer
+
+Goal: typed, trimmed, uppercased, code-preserving, deduplicated, validated, calendar-enriched rows.
+
+### Cleaning rules (enumerated, applied in this order)
+
+R1. Strip leading/trailing whitespace on every text field (`str.strip()`).
+R2. Uppercase `departamento`, `municipio`, `zona` (`str.upper()`). Applied with `.str.upper()` after whitespace strip.
+R3. `cod_depto` and `cod_muni`: keep as zero-padded strings. Enforce exactly 2 and 5 characters via `str.zfill(2)` / `str.zfill(5)`; if the raw value is non numeric, reject the row (R10).
+R4. `fecha_hecho`: parse with explicit format `%d/%m/%Y` via `pandas.to_datetime(..., format="%d/%m/%Y", errors="coerce")`. Never let pandas infer (avoids `MM/DD` ambiguity). Unparseable becomes `NaT` and is rejected by R10.
+R5. `cantidad`: cast to integer. Since verified all values are `1`, cast via `pandas.to_numeric(..., errors="coerce").astype("Int64")` then to int on load; non numeric or negative becomes `NaN` and is rejected.
+R6. `zona`: keep only `URBANA` / `RURAL`; anything else is rejected (R10).
+R7. Null check on `fecha_hecho`, `cod_depto`, `departamento`, `cod_muni`, `municipio`, `zona`, `cantidad`. Any null is rejected (R10). Empty string counts as null.
+R8. Referential sanity: `cod_depto` must equal the first 2 characters of `cod_muni`; if not, reject with reason `depto_muni_mismatch`.
+R9. Deduplication. Chosen rule, deliberate: drop exact duplicate business rows, keeping the first occurrence, keyed on `(fecha_hecho, cod_depto, cod_muni, zona, cantidad)`. `departamento` and `municipio` are functionally dependent on the codes, so they are not part of the key. Configurable via `ETL_DEDUP_MODE`:
+    - `drop` (default): keep one row per key. Effect on the verified dataset: 15,696 raw rows to 14,212 silver rows, removing 1,484 exact duplicates (9.45 percent). Crime total (sum of `CANTIDAD`) goes from 15,696 to 14,212.
+    - `sum`: group by the same key and sum `CANTIDAD`. On this dataset it would reproduce 15,696 because every duplicate group sums back to its own count, so the total is preserved but rows collapse to 14,212. Provided for datasets where `CANTIDAD` is a real magnitude and duplicates are partial reports.
+    The default `drop` treats repeated identical rows as ingestion duplication, not distinct events, because there is no event id in the source and `CANTIDAD` is always 1.
+R10. Every rejected row is copied (raw values plus a `reject_reason`) to `silver_rejected_rows` in the same transaction, so nothing is silently lost.
+R11. Calendar derivation from `fecha_hecho`: `year`, `month` (1-12), `quarter` (1-4 from `(month-1)//3+1`), `weekday_num` (ISO 1=Monday .. 7=Sunday via `dt.weekday()+1`), `weekday_name` (`Monday`..`Sunday`).
+R12. Electoral period assignment via `violence_etl/periods.py` (next section).
+R13. Add `row_hash` = sha256 hex of the dedup key fields, for audit and idempotency, plus `silver_loaded_at`.
+
+### Silver table definition
+
+```python
+class SilverCrimes(Base):
+    __tablename__ = "silver_crimes"
+    __table_args__ = (
+        UniqueConstraint("fecha_hecho", "cod_depto", "cod_muni", "zona",
+                         "cantidad", name="uq_silver_business_key"),
+        Index("ix_silver_year_period", "year", "electoral_period"),
+    )
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    fecha_hecho = Column(Date, nullable=False, index=True)
+    cod_depto = Column(String(2), nullable=False)
+    departamento = Column(String(100), nullable=False)
+    cod_muni = Column(String(5), nullable=False)
+    municipio = Column(String(150), nullable=False)
+    zona = Column(String(10), nullable=False)
+    cantidad = Column(Integer, nullable=False)
+    year = Column(Integer, nullable=False)
+    month = Column(Integer, nullable=False)
+    quarter = Column(Integer, nullable=False)
+    weekday_num = Column(Integer, nullable=False)
+    weekday_name = Column(String(10), nullable=False)
+    electoral_period = Column(String(20), nullable=False, index=True)
+    row_hash = Column(String(64), nullable=False)
+    source_sha256 = Column(String(64), nullable=False, index=True)
+    silver_loaded_at = Column(DateTime(timezone=False), nullable=False)
+
+class SilverRejectedRows(Base):
+    __tablename__ = "silver_rejected_rows"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    source_sha256 = Column(String(64), nullable=True)
+    row_num = Column(Integer, nullable=True)
+    reject_reason = Column(String(64), nullable=False)
+    raw_values = Column(Text, nullable=False)          # JSON string of raw dict
+    rejected_at = Column(DateTime(timezone=False), nullable=False)
+```
+
+`String(100)` / `String(150)` cover the observed maxima (18 and 27 chars) with headroom.
+
+### Silver load behavior (`violence_etl/silver.py`)
+
+Function `build_silver(engine, settings, force=False) -> dict`:
+
+1. Read `bronze_crimes_raw` for the target `source_sha256` (default: the latest loaded sha in the ingestion log) into a DataFrame via `pandas.read_sql`.
+2. Apply R1..R8, splitting valid and rejected frames.
+3. Apply R9 dedup per `settings.dedup_mode`.
+4. Apply R11..R13.
+5. Idempotency: full deterministic refresh. If `force`, `DELETE FROM silver_crimes` and `DELETE FROM silver_rejected_rows` for this sha; otherwise use an upsert on the business-key unique constraint (`INSERT ... ON CONFLICT DO NOTHING` on PostgreSQL, `INSERT OR IGNORE` on SQLite) so re-running never duplicates. Since the unique constraint exists, a second identical run inserts zero rows.
+6. Insert rejected rows.
+7. Return counts: `{"raw_rows", "silver_rows", "rejected_rows", "dropped_duplicates", "total_crimes"}` and log them.
+
+## Electoral period classification
+
+Values (exactly): `pre-electoral`, `electoral`, `intermediate`, `post-electoral`.
+
+Definitions:
+- electoral: the election year.
+- pre-electoral: 1 year before the election year.
+- post-electoral: 1 year after the election year.
+- intermediate: the single year between post-electoral and the next pre-electoral.
+
+Reference cycle from the brief, which the rule must reproduce exactly: `pre-electoral: 2013, electoral: 2014, post-electoral: 2015, intermediate: 2016, pre-electoral: 2017`.
+
+### Authoritative rule (configurable)
+
+Colombian general elections (presidencia and congreso) are every 4 years: 2002, 2006, 2010, 2014, 2018, 2022, 2026.
+
+`violence_etl/periods.py`:
+
+```python
+from __future__ import annotations
+from typing import Dict, Iterable, Tuple
+
+ELECTION_YEARS: Tuple[int, ...] = (2002, 2006, 2010, 2014, 2018, 2022, 2026)
+CYCLE_ANCHOR = ELECTION_YEARS[0]
+CYCLE_LEN = 4
+UNCLASSIFIED = "unclassified"
+
+_OFFSET_TO_PERIOD: Dict[int, str] = {
+    0: "electoral",
+    1: "post-electoral",
+    2: "intermediate",
+    3: "pre-electoral",
+}
+
+def is_cycle_valid(election_years: Iterable[int] = ELECTION_YEARS) -> bool:
+    ys = sorted(election_years)
+    return all((b - a) == CYCLE_LEN for a, b in zip(ys, ys[1:]))
+
+def electoral_period(year, election_years=ELECTION_YEARS) -> str:
+    if year < CYCLE_ANCHOR - 1:
+        return UNCLASSIFIED
+    if year in set(election_years):
+        return "electoral"
+    if (year - 1) in set(election_years):
+        return "post-electoral"
+    if (year + 1) in set(election_years):
+        return "pre-electoral"
+    offset = (year - CYCLE_ANCHOR) % CYCLE_LEN
+    return _OFFSET_TO_PERIOD[offset]
+```
+
+The function first does explicit membership tests (semantic anchors), then falls back to modular arithmetic. `is_cycle_valid` is asserted at import/log time; if a customized `ELECTION_YEARS` is not exactly 4 years apart the module logs a warning.
+
+Out-of-cycle years: any year strictly before `CYCLE_ANCHOR - 1` (that is, before 2001) returns `unclassified`. With the default configuration every year from 2001 onward maps, so every year in the dataset (2003..2026) is classified and no year is unmapped.
+
+### Complete mapping table 2003..2026
+
+| Year | Period |
+| --- | --- |
+| 2003 | post-electoral |
+| 2004 | intermediate |
+| 2005 | pre-electoral |
+| 2006 | electoral |
+| 2007 | post-electoral |
+| 2008 | intermediate |
+| 2009 | pre-electoral |
+| 2010 | electoral |
+| 2011 | post-electoral |
+| 2012 | intermediate |
+| 2013 | pre-electoral |
+| 2014 | electoral |
+| 2015 | post-electoral |
+| 2016 | intermediate |
+| 2017 | pre-electoral |
+| 2018 | electoral |
+| 2019 | post-electoral |
+| 2020 | intermediate |
+| 2021 | pre-electoral |
+| 2022 | electoral |
+| 2023 | post-electoral |
+| 2024 | intermediate |
+| 2025 | pre-electoral |
+| 2026 | electoral |
+
+This table is asserted in `tests/test_periods.py` for every year 2003..2026, so the mapper cannot silently drift. It covers the whole data range with no unmapped year.
+
+## Gold layer
+
+Goal: small denormalized tables ready for direct SQL or BI queries. Built by full refresh (truncate and rewrite) from `silver_crimes`, which keeps them deterministic and idempotent. Tables, not views, so the same objects work on SQLite and PostgreSQL.
+
+```python
+class GoldTop5Departments(Base):
+    __tablename__ = "gold_top5_departments"
+    rank = Column(Integer, primary_key=True)
+    cod_depto = Column(String(2), nullable=False)
+    departamento = Column(String(100), nullable=False)
+    total_crimes = Column(Integer, nullable=False)
+
+class GoldCrimesByDepartment(Base):
+    __tablename__ = "gold_crimes_by_department"
+    cod_depto = Column(String(2), primary_key=True)
+    departamento = Column(String(100), nullable=False)
+    total_crimes = Column(Integer, nullable=False)
+
+class GoldCrimesByCalendar(Base):
+    __tablename__ = "gold_crimes_by_calendar"
+    __table_args__ = (
+        PrimaryKeyConstraint("year", "quarter", "month", "weekday_num"),
+    )
+    year = Column(Integer, nullable=False)
+    quarter = Column(Integer, nullable=False)
+    month = Column(Integer, nullable=False)
+    weekday_num = Column(Integer, nullable=False)
+    weekday_name = Column(String(10), nullable=False)
+    total_crimes = Column(Integer, nullable=False)
+
+class GoldCrimesByElectoralPeriod(Base):
+    __tablename__ = "gold_crimes_by_electoral_period"
+    electoral_period = Column(String(20), primary_key=True)
+    period_order = Column(Integer, nullable=False)
+    year_min = Column(Integer, nullable=False)
+    year_max = Column(Integer, nullable=False)
+    total_crimes = Column(Integer, nullable=False)
+    pct_of_total = Column(Numeric(6, 2), nullable=False)
+```
+
+Object mapping to the requirement:
+- a. top 5 departments by total crimes -> `gold_top5_departments` (`rank` 1..5, ordered by `total_crimes DESC`, tie-break `departamento ASC`).
+- b. total crimes by department -> `gold_crimes_by_department` (all 32 departments).
+- c. total crimes by year, month, weekday and quarter -> `gold_crimes_by_calendar` (grain: year x quarter x month x weekday).
+- d. total crimes by electoral period -> `gold_crimes_by_electoral_period` (`period_order` uses post, intermediate, pre, electoral for stable presentation or calendar order, documented in README; `pct_of_total` is share of the grand total, rounded to 2 decimals).
+
+`violence_etl/gold.py` exposes `build_gold(engine) -> dict`, which for each table: `DELETE` existing rows, run the aggregation with `pandas.groupby` or an `INSERT ... SELECT`, commit, and return row counts plus the grand total. Also optionally writes `data/gold/*.csv` exports controlled by a flag.
+
+Optional convenience: Alembic creates the four `gold_*` tables; the pipeline fills them. No gold views are required, but `README.md` documents the equivalent `SELECT` for each.
+
+## Migrations (Alembic)
+
+Setup:
+
+```
+alembic init -t generic migrations
+```
+
+`alembic.ini`: leave `sqlalchemy.url` blank; `env.py` sets it from settings so the same migrations run on SQLite and PostgreSQL.
+
+`migrations/env.py` key points:
+
+```python
+from violence_etl.settings import get_settings, database_url
+from violence_etl.models import Base
+
+config.set_main_option("sqlalchemy.url", database_url(get_settings()))
+target_metadata = Base.metadata
+
+def run_migrations_online():
+    connectable = engine_from_config(
+        config.get_section(config.config_ini_section),
+        prefix="sqlalchemy.",
+        poolclass=pool.NullPool,
+    )
+    with connectable.connect() as connection:
+        context.configure(
+            connection=connection,
+            target_metadata=target_metadata,
+            render_as_batch=True,   # SQLite ALTER support
+        )
+        with context.begin_transaction():
+            context.run_migrations()
+```
+
+Revision sequence (write migrations by hand, not autogenerate, so type choices are explicit and identical on both engines):
+
+```
+alembic revision -m "bronze tables"
+alembic revision -m "silver tables"
+alembic revision -m "gold tables"
+alembic upgrade head
+alembic downgrade base
+alembic current
+alembic history
+```
+
+- `0001_bronze.py`: create `bronze_crimes_raw`, `bronze_ingestion_log`, and indexes.
+- `0002_silver.py`: create `silver_crimes`, `silver_rejected_rows`, unique constraint and indexes.
+- `0003_gold.py`: create the four `gold_*` tables.
+
+Each migration has a working `downgrade`.
+
+## CLI
+
+`violence_etl/cli.py` uses `argparse` (stdlib, identical on 3.8/3.14). Entry point: `python -m violence_etl.cli <command>`.
+
+Commands:
+- `init-db`: run `alembic upgrade head` for the configured backend.
+- `download`: fetch the CSV to `data/bronze/landing` and print the sha256.
+- `ingest-bronze [--csv-path PATH] [--force]`: run bronze only.
+- `build-silver [--sha SHA] [--force]`: run silver only.
+- `build-gold`: run gold only.
+- `run-all [--csv-path PATH] [--force]`: bronze then silver then gold in order.
+- `validate`: read silver and gold and print the checks in the acceptance criteria.
+- `drop-db`: drop and recreate all `bronze_/silver_/gold_` tables (dev only, guarded by `--yes`).
+
+Global flags: `--backend postgres|sqlite`, `--sqlite-path PATH`, `--log-level LEVEL`. These override settings via env vars before `get_settings()` is called.
+
+`Makefile` aliases: `make install`, `make test`, `make init-db`, `make run-all`, `make lint`, `make sqlite-run` (runs the pipeline against `data/warehouse/violence_staging.db`).
+
+## Logging
+
+`violence_etl/logging_conf.py`:
+
+```python
+def configure_logging(level: str = "INFO") -> None:
+    logging.basicConfig(
+        level=getattr(logging, level.upper(), logging.INFO),
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+```
+
+Every layer logs: start, input row count, output row count, dropped/rejected counts, total crimes, elapsed seconds, and the `source_sha256`. Errors log the exception with `exc_info=True` and re-raise as a typed error.
+
+## Idempotency and error handling
+
+- Bronze: content-hash keyed. Re-downloading identical bytes is a no-op; `bronze_crimes_raw` has `UNIQUE(source_sha256, row_num)` and re-ingestion does delete-then-insert for that sha. `--force` bypasses the skip.
+- Silver: `UNIQUE(fecha_hecho, cod_depto, cod_muni, zona, cantidad)`; inserts use `ON CONFLICT DO NOTHING` (PostgreSQL) / `INSERT OR IGNORE` (SQLite). Re-running inserts zero new rows. `--force` does a full deterministic rebuild.
+- Gold: full refresh (`DELETE` then aggregate-insert) inside one transaction. Always converges to the same content.
+- Pipeline is safe to run repeatedly end to end; a second `run-all` on the same source changes nothing and logs `skipped` at bronze.
+- Error handling: `SchemaError` on header mismatch (fail fast, no writes). Row-level problems never abort the load; they route to `silver_rejected_rows` with a reason. DB errors roll back the transaction for that layer and surface with a non-zero exit code from the CLI.
+- Typed exceptions in `violence_etl/errors.py`: `EtlError`, `SchemaError`, `DownloadError`, `LoadError`.
+
+## Test plan
+
+Runner: pytest 8.3.5 (spans 3.8..3.14). Config in `pyproject.toml`:
+
+```toml
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["ignore::DeprecationWarning"]
+```
+
+Fixtures in `tests/conftest.py`:
+- `sqlite_engine`: creates a temp SQLite file under `tmp_path`, runs `Base.metadata.create_all`, yields the engine, disposes after.
+- `sample_csv`: path to `tests/fixtures/yi5j-5fe9_sample.csv` (about 40 hand-built rows covering both zones, both duplicate and distinct rows, all four period types, edge dates).
+- `bad_csv`: path to `tests/fixtures/yi5j-5fe9_bad.csv` (empty date, non numeric code, unexpected `ZONA`, `DD/MM` vs `MM/DD` ambiguity, null municipio).
+
+Unit tests:
+- `test_periods.py`: the full 2003..2026 table above asserted year by year; the reference cycle `{2013: pre-electoral, 2014: electoral, 2015: post-electoral, 2016: intermediate, 2017: pre-electoral}`; `2002 -> electoral`, `2026 -> electoral`; `2000 -> unclassified`; a non-4-year `ELECTION_YEARS` triggers `is_cycle_valid` False.
+- `test_schema.py`: exact expected header list, order, and case; mismatch raises `SchemaError`.
+- `test_settings.py`: defaults when env is empty; overrides via `monkeypatch.setenv`; `database_url` returns the `postgresql+psycopg://` and `sqlite:///` forms correctly; invalid values (`PGPORT`) raise.
+- `test_silver.py`: all R1..R13 rules individually; zero padding preserved on load (assert `cod_depto == "05"`, `cod_muni == "05660"`); date `31/08/2026` parses to `2026-08-31`; `11/12/2024` parses as 11 Dec not 12 Nov; exact-duplicate rows collapse (3 identical -> 1); `dedup_mode="sum"` sums instead; rejected rows land in `silver_rejected_rows` with the expected reason; `total_crimes` after dedup equals the distinct count on the sample.
+- `test_bronze.py`: header validation; `keep_default_na=False` keeps empty strings as empty strings; content hash stable; re-ingest of the same sha skips.
+- `test_gold.py`: top 5 ordering and rank values on the sample; `gold_crimes_by_department` totals equal the silver total; `gold_crimes_by_calendar` grain uniqueness; `gold_crimes_by_electoral_period` `pct_of_total` sums to about 100.
+
+Integration test `test_pipeline_sqlite.py`:
+- Uses a real temp SQLite file and the committed `sample_csv` fixture.
+- Runs `run_all` once, asserts bronze row count equals the CSV data row count, silver row count equals distinct business rows, `silver_rejected_rows` count matches the expected rejects, and gold tables are populated.
+- Runs `run_all` a second time and asserts no row counts change (idempotency).
+- Asserts the grand total from `gold_crimes_by_department` equals the grand total from `gold_crimes_by_electoral_period` equals the sum of silver `cantidad`.
+- Optional slow marker `@pytest.mark.full_dataset` to run against the real downloaded file when `ETL_FULL_DATASET=1`; skipped by default so CI stays fast and offline.
+
+Exact commands:
+
+```
+python -m pytest tests -q
+python -m pytest tests -q --cov=violence_etl --cov-report=term-missing
+python -m pytest tests/test_periods.py -q
+```
+
+## Notebook plan
+
+Notebooks use the PyCharm IDE managed Jupyter server (Project Settings > Python Interpreter > Jupyter: let PyCharm start/manage the server; the kernel is the project `.venv`). No separate `jupyter notebook` process is required. The notebook stack lives in `requirements-dev.txt`. Commit the `.ipynb` files; `.ipynb_checkpoints/` and `.jupyter/` are gitignored.
+
+- `notebooks/01_bronze_profiling.ipynb`: download or open the landing file, profile the raw CSV (row count, nulls, dtypes, value counts for `ZONA`, duplicate groups, date range), confirm the planning facts, and show the raw table after `ingest-bronze`.
+- `notebooks/02_silver_validation.ipynb`: run `build-silver` against SQLite, show before/after row counts, the dedup effect (15,696 to 14,212, total crimes 15,696 to 14,212), the rejected-rows breakdown, and the electoral-period distribution per year using the mapping table.
+- `notebooks/03_gold_analysis.ipynb`: query the four `gold_*` tables, render the top 5 departments, the by-department ranking, the calendar heat-style tables, and the crimes-by-electoral-period share, as a template that the README links to.
+
+Each notebook starts with a bootstrap cell that inserts the repo root on `sys.path` and calls `get_settings()` with `ETL_DB_BACKEND=sqlite` so notebooks never touch PostgreSQL by accident.
+
+## .gitignore
+
+```
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Virtualenv
+.venv/
+venv/
+env/
+
+# PyCharm
+.idea/
+*.iml
+out/
+
+# Env
+.env
+
+# Data artifacts
+data/bronze/landing/*.csv
+data/bronze/raw/*.csv
+data/silver/*
+data/gold/*
+!data/**/.gitkeep
+*.db
+*.sqlite
+*.sqlite3
+
+# Jupyter
+.ipynb_checkpoints/
+.jupyter/
+
+# OS
+.DS_Store
+```
+
+## Commit sequence (atomic, one feature per commit)
+
+Never commit or push to `main`.
+
+1. `chore: initialize repository` -- `git init`, create branch `feat/etl-pipeline`, add `.gitignore`, `.env.example`, `README.md` skeleton, `docs/PLAN.md`.
+2. `chore(deps): pin runtime and dev requirements` -- add `requirements.txt`, `requirements-dev.txt`, `pyproject.toml` (pytest config), `Makefile`.
+3. `feat(config): add env-driven settings and logging` -- `violence_etl/__init__.py`, `settings.py`, `logging_conf.py`, `errors.py`, `tests/test_settings.py`.
+4. `feat(db): add sqlalchemy models and engine factory` -- `violence_etl/db.py`, `models.py`, `schema.py`.
+5. `feat(migrations): add alembic setup and bronze migration` -- `alembic.ini`, `migrations/env.py`, `migrations/script.py.mako`, `migrations/versions/0001_bronze.py`.
+6. `feat(bronze): download and land raw csv` -- `violence_etl/io.py`, `bronze.py`, `tests/fixtures/*.csv`, `tests/test_bronze.py`.
+7. `feat(silver): add period mapper` -- `violence_etl/periods.py`, `tests/test_periods.py`.
+8. `feat(silver): curate, dedup and validate` -- `migrations/versions/0002_silver.py`, `violence_etl/silver.py`, `tests/test_silver.py`.
+9. `feat(gold): add denormalized query tables` -- `migrations/versions/0003_gold.py`, `violence_etl/gold.py`, `tests/test_gold.py`.
+10. `feat(cli): orchestrate the full pipeline` -- `violence_etl/pipeline.py`, `cli.py`, `tests/test_pipeline_sqlite.py`.
+11. `docs: add analysis notebooks and usage guide` -- `notebooks/01_bronze_profiling.ipynb`, `02_silver_validation.ipynb`, `03_gold_analysis.ipynb`, finalize `README.md` with the period table and gold SQL.
+
+Run `make lint` (ruff, configured in `pyproject.toml`) and `python -m pytest tests -q` before each commit; both interpreters if available.
+
+## Acceptance criteria (definition of done)
+
+1. `python -m pytest tests -q` passes on Python 3.8 and on Python 3.14.
+2. `python -m violence_etl.cli init-db` followed by `run-all` completes against SQLite and against PostgreSQL 16 without code changes, only via `ETL_DB_BACKEND`.
+3. `bronze_crimes_raw` holds exactly 15,696 rows for the verified source sha, every source field text, plus `source_url`, `load_ts`, `source_file`.
+4. `silver_crimes` holds 14,212 rows with `ETL_DEDUP_MODE=drop`, and the removed count is 1,484. Changing to `sum` yields 14,212 rows and a total of 15,696. The chosen default and its effect are documented in `README.md`.
+5. Zero unmapped years: every `year` in 2003..2026 has a non-null `electoral_period`, and the mapper matches the 24-row table exactly.
+6. `cod_depto` and `cod_muni` are never numeric: `SELECT cod_depto FROM silver_crimes LIMIT 1` returns a 2-char zero-padded string and `cod_muni` a 5-char one.
+7. Re-running `run-all` twice changes no table row counts (idempotent).
+8. Gold tables exist with the specified columns and keys: `gold_top5_departments` has 5 rows with ranks 1..5; `gold_crimes_by_department` has 32 rows; `gold_crimes_by_calendar` is unique on `(year, quarter, month, weekday_num)`; `gold_crimes_by_electoral_period` has 4 rows and `SUM(pct_of_total)` is 100.00 plus or minus rounding.
+9. Grand totals agree: sum of `gold_crimes_by_department.total_crimes` equals sum of `gold_crimes_by_electoral_period.total_crimes` equals `SELECT SUM(cantidad) FROM silver_crimes` equals 14,212 under the default policy.
+10. Row-level rejects are visible in `silver_rejected_rows` with a reason; nothing is silently dropped.
+11. `.gitignore` excludes `*.db`, `*.sqlite`, `.venv/`, `.idea/`, `.env`, and data artifacts; none of these are tracked.
+12. All changes are on branch `feat/etl-pipeline`, committed in the order above with semantic prefixes.
