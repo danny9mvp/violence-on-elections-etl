@@ -5,6 +5,7 @@ ingestion metadata (content hash, source file/url, load timestamp, row order).
 """
 from __future__ import annotations
 
+import datetime
 import logging
 import os
 import time

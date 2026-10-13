@@ -9,7 +9,7 @@ import os
 from typing import Optional, Union
 
 from sqlalchemy import create_engine, text
-from sqlalchemy.engine import Engine, URL, make_url
+from sqlalchemy.engine import URL, Engine, make_url
 from sqlalchemy.orm import Session, sessionmaker
 
 from violence_etl.settings import Settings, get_settings
