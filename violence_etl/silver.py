@@ -17,7 +17,7 @@ import time
 from typing import Dict, List, Optional
 
 import pandas as pd
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.engine import Engine
 
 from violence_etl.bronze import latest_loaded_sha, read_bronze_frame
@@ -215,9 +215,14 @@ def _silver_records(df: pd.DataFrame) -> List[Dict[str, object]]:
     return df[cols].to_dict("records")
 
 
-def _insert_ignore(conn, model, records) -> None:
+def _insert_ignore(conn, model, records) -> int:
+    """Insert ``records``, ignoring business-key conflicts. Return rowcount.
+
+    The returned count is the number of rows actually written this run, which
+    differs from ``len(records)`` when a re-run hits existing rows.
+    """
     if not records:
-        return
+        return 0
     dialect = conn.dialect.name
     if dialect == "sqlite":
         from sqlalchemy.dialects.sqlite import insert as dialect_insert
@@ -228,9 +233,10 @@ def _insert_ignore(conn, model, records) -> None:
 
     if dialect_insert is not None:
         stmt = dialect_insert(model).on_conflict_do_nothing()
-        conn.execute(stmt, records)
     else:  # pragma: no cover
-        conn.execute(model.__table__.insert(), records)
+        stmt = model.__table__.insert()
+    result = conn.execute(stmt, records)
+    return int(result.rowcount if result.rowcount is not None else 0)
 
 
 def build_silver(
@@ -259,7 +265,6 @@ def build_silver(
 
     enriched = _enrich(deduped, sha)
     silver_records = _silver_records(enriched)
-    total_crimes = int(enriched["cantidad"].sum()) if not enriched.empty else 0
 
     loaded_at = _naive_utc_now()
     rejected_records = []
@@ -283,38 +288,68 @@ def build_silver(
             }
         )
 
+    # Silver holds exactly one active snapshot: the target sha. Rows from any
+    # previous export are purged so uniqueness on the business key is global
+    # and gold (which reads all of silver) never mixes snapshots.
     with engine.begin() as conn:
+        conn.execute(
+            delete(SilverCrimes).where(SilverCrimes.source_sha256 != sha)
+        )
+        conn.execute(
+            delete(SilverRejectedRows).where(SilverRejectedRows.source_sha256 != sha)
+        )
         if force:
             conn.execute(
                 delete(SilverCrimes).where(SilverCrimes.source_sha256 == sha)
             )
-        _insert_ignore(conn, SilverCrimes, silver_records)
+        inserted_rows = _insert_ignore(conn, SilverCrimes, silver_records)
+
         # Rejected rows are rebuilt per sha so repeated runs stay idempotent.
         conn.execute(
             delete(SilverRejectedRows).where(SilverRejectedRows.source_sha256 == sha)
         )
         if rejected_records:
-            conn.execute(SilverRejectedRows.__table__.insert(), rejected_records)
+            rejected_result = conn.execute(
+                SilverRejectedRows.__table__.insert(), rejected_records
+            )
+            rejected_rows = int(
+                rejected_result.rowcount if rejected_result.rowcount is not None else 0
+            )
+        else:
+            rejected_rows = 0
+
+        # Report what is in the database for the active snapshot, not the
+        # in-memory frame (they agree, but the DB is the source of truth).
+        db_silver_rows = int(
+            conn.execute(select(func.count()).select_from(SilverCrimes)).scalar() or 0
+        )
+        db_total_crimes = int(
+            conn.execute(
+                select(func.coalesce(func.sum(SilverCrimes.cantidad), 0))
+            ).scalar()
+            or 0
+        )
 
     result = {
         "source_sha256": sha,
         "raw_rows": raw_rows,
-        "silver_rows": int(len(enriched)),
-        "inserted_rows": len(silver_records),
-        "rejected_rows": int(len(rejected_records)),
+        "silver_rows": db_silver_rows,
+        "inserted_rows": inserted_rows,
+        "rejected_rows": rejected_rows,
         "dropped_duplicates": dropped,
-        "total_crimes": total_crimes,
+        "total_crimes": db_total_crimes,
         "dedup_mode": settings.dedup_mode,
         "elapsed_seconds": round(time.time() - started, 3),
     }
     logger.info(
-        "silver: raw_rows=%d silver_rows=%d rejected=%d dropped_duplicates=%d "
-        "total_crimes=%d mode=%s sha256=%s elapsed=%.2fs",
+        "silver: raw_rows=%d silver_rows=%d inserted=%d rejected=%d "
+        "dropped_duplicates=%d total_crimes=%d mode=%s sha256=%s elapsed=%.2fs",
         raw_rows,
         result["silver_rows"],
-        result["rejected_rows"],
+        inserted_rows,
+        rejected_rows,
         dropped,
-        total_crimes,
+        db_total_crimes,
         settings.dedup_mode,
         sha,
         result["elapsed_seconds"],

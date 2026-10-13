@@ -220,3 +220,49 @@ def test_silver_rerun_is_idempotent(sqlite_engine, settings_sqlite, sample_csv):
     with sqlite_engine.connect() as conn:
         count = conn.execute(select(func.count()).select_from(SilverCrimes)).scalar()
     assert int(count) == 32
+
+
+def test_inserted_rows_track_actual_writes(sqlite_engine, settings_sqlite, sample_csv):
+    ingest_bronze(sqlite_engine, settings_sqlite, csv_path=sample_csv)
+    first = build_silver(sqlite_engine, settings_sqlite)
+    second = build_silver(sqlite_engine, settings_sqlite)
+    # The first run writes all rows; the second conflicts with every row.
+    assert first["inserted_rows"] == 32
+    assert second["inserted_rows"] == 0
+    # Reported totals describe what the database holds, not the in-memory frame.
+    assert first["silver_rows"] == second["silver_rows"] == 32
+
+
+def test_rejected_rows_track_actual_writes(sqlite_engine, settings_sqlite, bad_csv):
+    ingest_bronze(sqlite_engine, settings_sqlite, csv_path=bad_csv)
+    first = build_silver(sqlite_engine, settings_sqlite)
+    second = build_silver(sqlite_engine, settings_sqlite)
+    assert first["rejected_rows"] == second["rejected_rows"] == 12
+    with sqlite_engine.connect() as conn:
+        count = conn.execute(
+            select(func.count()).select_from(SilverRejectedRows)
+        ).scalar()
+    assert int(count) == 12
+
+
+def test_new_snapshot_replaces_previous(sqlite_engine, settings_sqlite, tmp_path):
+    first_path = _write(
+        tmp_path,
+        ['"15/06/2014","05","ANTIOQUIA","05001","MEDELLIN","URBANA","1"\n'],
+        name="first.csv",
+    )
+    build_via(sqlite_engine, settings_sqlite, first_path)
+    second_path = _write(
+        tmp_path,
+        ['"16/06/2014","05","ANTIOQUIA","05001","MEDELLIN","URBANA","2"\n'],
+        name="second.csv",
+    )
+    out = build_via(sqlite_engine, settings_sqlite, second_path)
+    # Silver holds only the active snapshot; the old sha is purged.
+    assert out["silver_rows"] == 1
+    with sqlite_engine.connect() as conn:
+        shas = [
+            r[0]
+            for r in conn.execute(select(SilverCrimes.source_sha256).distinct())
+        ]
+    assert shas == [out["source_sha256"]]
