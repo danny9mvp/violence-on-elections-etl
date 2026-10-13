@@ -1,0 +1,17 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["ignore::DeprecationWarning"]
+markers = [
+    "full_dataset: runs against the real downloaded dataset when ETL_FULL_DATASET=1",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py38"
+# Notebooks intentionally import after inserting sys.path in the bootstrap cell.
+extend-exclude = ["notebooks"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+ignore = ["E501"]
