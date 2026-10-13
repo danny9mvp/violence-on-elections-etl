@@ -1,5 +1,8 @@
 # Implementation Plan: Violence on Elections ETL (Medallion)
 
+This is the design and rationale document. For install, configuration, the CLI
+reference, the table catalogue and day-to-day usage, see `README.md`.
+
 ## Context and verified source facts
 
 Source: `http://www.datos.gov.co/api/v3/views/yi5j-5fe9/export.csv` (Socrata export, follows a 301 redirect; must use `requests` with `allow_redirects=True` or curl `-L`).
@@ -28,9 +31,9 @@ The stack must import and run on both Python 3.8 and Python 3.14 from one source
 - Use SQLAlchemy classic `Column(...)` declarative style, not `Mapped[...]` / `mapped_column`, to avoid runtime annotation evaluation differences across 3.8 and 3.14.
 - `datetime.UTC` does not exist on 3.8; use `datetime.timezone.utc`. `datetime.date.fromisocalendar` exists since 3.8 (ok). `zoneinfo` is 3.9+; avoid it.
 
-One dependency cannot span 3.8 to 3.14 with a single pin: pandas (and its numpy build). pandas 2.0.3 is the last release that installs on 3.8 but it has no CPython 3.13 or 3.14 wheels; pandas 2.3.3 has 3.9 to 3.14 wheels (including cp314) but requires >=3.9. Fix: environment markers in `requirements.txt`. Same pattern needed for numpy, psycopg2-binary, pytest, python-dotenv, requests, and the Jupyter dev stack. PostgreSQL driver uses psycopg 3 (`psycopg==3.2.10` with `psycopg-binary==3.2.10`, which has cp38 through cp314 wheels), dialect URL `postgresql+psycopg://`, avoiding psycopg2-binary which has no cp314 wheel at any 3.8-compatible version.
+One dependency cannot span 3.8 to 3.14 with a single pin: pandas (and its numpy build). pandas 2.0.3 is the last release that installs on 3.8 but it has no CPython 3.13 or 3.14 wheels; pandas 2.3.3 has 3.9 to 3.14 wheels (including cp314) but requires >=3.9. Fix: environment markers in `requirements.txt`. The same marker pattern is used for numpy and, in `requirements-dev.txt`, for pytest-cov, coverage and the Jupyter dev stack. pytest, python-dotenv and requests use a single pin because one release spans the whole range, and psycopg2-binary is avoided entirely. PostgreSQL driver uses psycopg 3 (`psycopg==3.2.10` with `psycopg-binary==3.2.10`, which has cp38 through cp314 wheels), dialect URL `postgresql+psycopg://`.
 
-### requirements.txt (runtime, pinned, with markers)
+## requirements.txt (runtime, pinned, with markers)
 
 ```
 # Core
@@ -58,11 +61,12 @@ Notes:
 - alembic 1.14.1 declares `>=3.8` and is pure Python (`py3-none-any`), so it spans the whole range. Do not use alembic >=1.16 (requires >=3.9).
 - pytest is deliberately excluded from runtime requirements and lives in the dev file.
 
-### requirements-dev.txt
+## requirements-dev.txt
 
 ```
 -r requirements.txt
 pytest==8.3.5
+ruff==0.8.6
 pytest-cov==5.0.0; python_version < "3.9"
 pytest-cov==6.2.1; python_version >= "3.9"
 coverage==7.6.1; python_version < "3.9"
@@ -109,15 +113,18 @@ ViolenceOnElectionsEtl/
 │   └── versions/
 │       ├── 0001_bronze.py
 │       ├── 0002_silver.py
-│       └── 0003_gold.py
+│       ├── 0003_gold.py
+│       └── 0004_bronze_ingestion_unique.py
 ├── violence_etl/
 │   ├── __init__.py
 │   ├── settings.py                # single env-driven config module
 │   ├── logging_conf.py
+│   ├── errors.py                  # typed exceptions
 │   ├── db.py                      # engine + session factory
 │   ├── models.py                  # SQLAlchemy Base + all tables
 │   ├── schema.py                  # expected CSV header + column contract
 │   ├── io.py                      # download, hash, read CSV
+│   ├── timeutil.py                # naive UTC now helper
 │   ├── periods.py                 # electoral period mapper + ELECTION_YEARS
 │   ├── bronze.py                  # bronze ingestion
 │   ├── silver.py                  # curation + dedup + validation
@@ -132,14 +139,16 @@ ViolenceOnElectionsEtl/
 │   ├── gold/.gitkeep              # optional csv exports
 │   └── warehouse/.gitkeep         # sqlite db files (gitignored)
 ├── notebooks/
+│   ├── README.md
 │   ├── 01_bronze_profiling.ipynb
 │   ├── 02_silver_validation.ipynb
 │   └── 03_gold_analysis.ipynb
 └── tests/
     ├── conftest.py
     ├── fixtures/
-    │   ├── yi5j-5fe9_sample.csv       # small hand-built sample (committed)
-    │   └── yi5j-5fe9_bad.csv          # nulls + bad dates (committed)
+    │   ├── yi5j-5fe9_sample.csv       # 40 hand-built rows (committed)
+    │   ├── yi5j-5fe9_bad.csv          # nulls + bad dates (committed)
+    │   └── yi5j-5fe9_many_depts.csv   # 7 departments, for top-5 truncation
     ├── test_settings.py
     ├── test_periods.py
     ├── test_schema.py
@@ -165,16 +174,22 @@ One codebase, two databases: use table-name prefixes (`bronze_`, `silver_`, `gol
 
 ## Settings module (single env-driven config)
 
-`violence_etl/settings.py`:
+`violence_etl/settings.py` exposes a frozen `Settings` dataclass, a
+`get_settings()` factory and three URL helpers. The full variable table with
+defaults is in `README.md`; this section records the design intent.
 
 ```python
 from __future__ import annotations
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 from dotenv import load_dotenv
+from sqlalchemy.engine import URL, make_url
 
 load_dotenv()
+
+DEFAULT_SOURCE_URL = "http://www.datos.gov.co/api/v3/views/yi5j-5fe9/export.csv"
+DEFAULT_SQLITE_PATH = "data/warehouse/violence_staging.db"
 
 @dataclass(frozen=True)
 class Settings:
@@ -182,59 +197,51 @@ class Settings:
     pg_host: str
     pg_port: int
     pg_user: str
-    pg_password: str
+    pg_password: str = field(repr=False)
     pg_database: str
     sqlite_path: str
     source_url: str
     log_level: str
     dedup_mode: str       # "drop" | "sum"
     bronze_dir: str
-
-def _env(key: str, default: str) -> str:
-    return os.environ.get(key, default)
+    database_url_override: Optional[str] = field(default=None, repr=False)
 
 def get_settings() -> Settings:
-    backend = _env("ETL_DB_BACKEND", "postgres").strip().lower()
+    override = os.environ.get("DATABASE_URL") or None
+    backend = _infer_backend(os.environ.get("ETL_DB_BACKEND", ""), override)
     return Settings(
         backend=backend,
-        pg_host=_env("PGHOST", "localhost"),
-        pg_port=int(_env("PGPORT", "5432")),
-        pg_user=_env("PGUSER", "postgres"),
-        pg_password=_env("PGPASSWORD", "postgres"),
-        pg_database=_env("PGDATABASE", "violence"),
-        sqlite_path=_env("ETL_SQLITE_PATH", "data/warehouse/violence_staging.db"),
-        source_url=_env("ETL_SOURCE_URL", "http://www.datos.gov.co/api/v3/views/yi5j-5fe9/export.csv"),
-        log_level=_env("ETL_LOG_LEVEL", "INFO"),
-        dedup_mode=_env("ETL_DEDUP_MODE", "drop"),
-        bronze_dir=_env("ETL_BRONZE_DIR", "data/bronze"),
-    )
-
-def database_url(settings: Optional[Settings] = None) -> str:
-    s = settings or get_settings()
-    if s.backend == "sqlite":
-        return "sqlite:///" + s.sqlite_path
-    return "postgresql+psycopg://{u}:{p}@{h}:{port}/{d}".format(
-        u=s.pg_user, p=s.pg_password, h=s.pg_host, port=s.pg_port, d=s.pg_database
+        pg_host=os.environ.get("PGHOST", "localhost"),
+        pg_port=int(os.environ.get("PGPORT", "5432")),
+        pg_user=os.environ.get("PGUSER", "postgres"),
+        pg_password=os.environ.get("PGPASSWORD", "postgres"),
+        pg_database=os.environ.get("PGDATABASE", "violence"),
+        sqlite_path=os.environ.get("ETL_SQLITE_PATH", DEFAULT_SQLITE_PATH),
+        source_url=os.environ.get("ETL_SOURCE_URL", DEFAULT_SOURCE_URL),
+        log_level=os.environ.get("ETL_LOG_LEVEL", "INFO"),
+        dedup_mode=os.environ.get("ETL_DEDUP_MODE", "drop"),
+        bronze_dir=os.environ.get("ETL_BRONZE_DIR", "data/bronze"),
+        database_url_override=override,
     )
 ```
 
-Env vars and defaults (defaults match the required credentials):
+Design points:
 
-| Variable | Default | Meaning |
-| --- | --- | --- |
-| `ETL_DB_BACKEND` | `postgres` | `postgres` or `sqlite` |
-| `PGHOST` | `localhost` | warehouse host |
-| `PGPORT` | `5432` | warehouse port |
-| `PGUSER` | `postgres` | warehouse user |
-| `PGPASSWORD` | `postgres` | warehouse password |
-| `PGDATABASE` | `violence` | warehouse database |
-| `ETL_SQLITE_PATH` | `data/warehouse/violence_staging.db` | staging/test sqlite file |
-| `ETL_SOURCE_URL` | the Socrata export URL | download source |
-| `ETL_LOG_LEVEL` | `INFO` | root log level |
-| `ETL_DEDUP_MODE` | `drop` | `drop` or `sum` duplicate policy |
-| `ETL_BRONZE_DIR` | `data/bronze` | landing/raw root |
+- `database_url_object()` builds a `sqlalchemy.engine.URL` with `URL.create`, or
+  returns `make_url(DATABASE_URL)` when the override is set. Handing the object
+  to `create_engine` and to Alembic (`cfg.attributes["sqlalchemy.url"]`) keeps
+  raw credentials out of string interpolation and out of `ConfigParser`, so
+  passwords with `@`, `:`, `/` or `%` work.
+- `database_url()` renders the URL as a string with the password visible (the
+  override is returned verbatim). `database_url_display()` masks the password
+  for logging.
+- `DATABASE_URL` takes precedence over `ETL_DB_BACKEND`, the `PG*` variables and
+  `ETL_SQLITE_PATH`. `_infer_backend` reads the override scheme only when
+  `ETL_DB_BACKEND` is empty.
+- `pg_password` and `database_url_override` use `repr=False` so credentials do
+  not appear in `repr(settings)`.
 
-`.env.example` contains these keys with the defaults above; `.env` is gitignored.
+`.env.example` contains the keys with their defaults; `.env` is gitignored.
 
 ## Bronze layer
 
@@ -247,7 +254,7 @@ Artifacts:
    updated in place on every attempt (`loaded` or `skipped`), so repeated runs
    are idempotent. See README "Idempotency and reload semantics".
 
-### Table definitions (SQLAlchemy classic column style, `violence_etl/models.py`)
+## Table definitions (SQLAlchemy classic column style, `violence_etl/models.py`)
 
 ```python
 Base = declarative_base()
@@ -285,7 +292,7 @@ class BronzeIngestionLog(Base):
 
 `String(64)`, `String(255)`, `Text` are used (not `String` without length) so the schema renders identically on SQLite and PostgreSQL.
 
-### Bronze ingestion behavior (`violence_etl/bronze.py`)
+## Bronze ingestion behavior (`violence_etl/bronze.py`)
 
 Function `ingest_bronze(engine, settings, csv_path=None) -> dict`:
 
@@ -302,7 +309,7 @@ No cleaning happens here. Text stays text.
 
 Goal: typed, trimmed, uppercased, code-preserving, deduplicated, validated, calendar-enriched rows.
 
-### Cleaning rules (enumerated, applied in this order)
+## Cleaning rules (enumerated, applied in this order)
 
 R1. Strip leading/trailing whitespace on every text field (`str.strip()`).
 R2. Uppercase `departamento`, `municipio`, `zona` (`str.upper()`). Applied with `.str.upper()` after whitespace strip.
@@ -321,7 +328,7 @@ R11. Calendar derivation from `fecha_hecho`: `year`, `month` (1-12), `quarter` (
 R12. Electoral period assignment via `violence_etl/periods.py` (next section).
 R13. Add `row_hash` = sha256 hex of the dedup key fields, for audit and idempotency, plus `silver_loaded_at`.
 
-### Silver table definition
+## Silver table definition
 
 ```python
 class SilverCrimes(Base):
@@ -361,17 +368,17 @@ class SilverRejectedRows(Base):
 
 `String(100)` / `String(150)` cover the observed maxima (18 and 27 chars) with headroom.
 
-### Silver load behavior (`violence_etl/silver.py`)
+## Silver load behavior (`violence_etl/silver.py`)
 
-Function `build_silver(engine, settings, force=False) -> dict`:
+Function `build_silver(engine, settings, sha=None, force=False) -> dict`:
 
-1. Read `bronze_crimes_raw` for the target `source_sha256` (default: the latest loaded sha in the ingestion log) into a DataFrame via `pandas.read_sql`.
+1. Read `bronze_crimes_raw` for the target `source_sha256` (default: `latest_loaded_sha`, the snapshot with the highest `raw_id`, derived from the raw rows rather than the ingestion-log status) into a DataFrame via `pandas.read_sql`.
 2. Apply R1..R8, splitting valid and rejected frames.
 3. Apply R9 dedup per `settings.dedup_mode`.
 4. Apply R11..R13.
-5. Idempotency: full deterministic refresh. If `force`, `DELETE FROM silver_crimes` and `DELETE FROM silver_rejected_rows` for this sha; otherwise use an upsert on the business-key unique constraint (`INSERT ... ON CONFLICT DO NOTHING` on PostgreSQL, `INSERT OR IGNORE` on SQLite) so re-running never duplicates. Since the unique constraint exists, a second identical run inserts zero rows. Delivered: silver keeps a single active snapshot: rows for any other `source_sha256` are purged first, so an updated export replaces the previous one and gold never mixes snapshots. `inserted_rows` is the insert rowcount; `silver_rows`/`total_crimes` are read back from the database.
-6. Insert rejected rows.
-7. Return counts: `{"raw_rows", "silver_rows", "rejected_rows", "dropped_duplicates", "total_crimes"}` and log them.
+5. Idempotency: full deterministic refresh. Silver keeps a single active snapshot: rows for any other `source_sha256` are purged first, so an updated export replaces the previous one and gold never mixes snapshots. If `force`, rows for this sha are deleted first; then rows are inserted with business-key conflicts ignored (`ON CONFLICT DO NOTHING` on PostgreSQL, `INSERT OR IGNORE` on SQLite), so a second identical run writes zero new rows. `inserted_rows` is the insert rowcount; `silver_rows`/`total_crimes` are read back from the database.
+6. Rebuild rejected rows for this sha.
+7. Return counts: `{"raw_rows", "silver_rows", "inserted_rows", "rejected_rows", "dropped_duplicates", "total_crimes", "dedup_mode"}` and log them.
 
 ## Electoral period classification
 
@@ -385,7 +392,7 @@ Definitions:
 
 Reference cycle from the brief, which the rule must reproduce exactly: `pre-electoral: 2013, electoral: 2014, post-electoral: 2015, intermediate: 2016, pre-electoral: 2017`.
 
-### Authoritative rule (configurable)
+## Authoritative rule (configurable)
 
 Colombian general elections (presidencia and congreso) are every 4 years: 2002, 2006, 2010, 2014, 2018, 2022, 2026.
 
@@ -428,76 +435,17 @@ The function first does explicit membership tests (semantic anchors), then falls
 
 Out-of-cycle years: any year strictly before `CYCLE_ANCHOR - 1` (that is, before 2001) returns `unclassified`. With the default configuration every year from 2001 onward maps, so every year in the dataset (2003..2026) is classified and no year is unmapped.
 
-### Complete mapping table 2003..2026
+## Complete mapping table 2003..2026
 
-| Year | Period |
-| --- | --- |
-| 2003 | post-electoral |
-| 2004 | intermediate |
-| 2005 | pre-electoral |
-| 2006 | electoral |
-| 2007 | post-electoral |
-| 2008 | intermediate |
-| 2009 | pre-electoral |
-| 2010 | electoral |
-| 2011 | post-electoral |
-| 2012 | intermediate |
-| 2013 | pre-electoral |
-| 2014 | electoral |
-| 2015 | post-electoral |
-| 2016 | intermediate |
-| 2017 | pre-electoral |
-| 2018 | electoral |
-| 2019 | post-electoral |
-| 2020 | intermediate |
-| 2021 | pre-electoral |
-| 2022 | electoral |
-| 2023 | post-electoral |
-| 2024 | intermediate |
-| 2025 | pre-electoral |
-| 2026 | electoral |
-
-This table is asserted in `tests/test_periods.py` for every year 2003..2026, so the mapper cannot silently drift. It covers the whole data range with no unmapped year.
+The full 2003..2026 table lives in `README.md` and is asserted year by year in
+`tests/test_periods.py`, so the mapper cannot silently drift. It covers the
+whole data range with no unmapped year.
 
 ## Gold layer
 
 Goal: small denormalized tables ready for direct SQL or BI queries. Built by full refresh (truncate and rewrite) from `silver_crimes`, which keeps them deterministic and idempotent. Tables, not views, so the same objects work on SQLite and PostgreSQL.
 
-```python
-class GoldTop5Departments(Base):
-    __tablename__ = "gold_top5_departments"
-    rank = Column(Integer, primary_key=True)
-    cod_depto = Column(String(2), nullable=False)
-    departamento = Column(String(100), nullable=False)
-    total_crimes = Column(Integer, nullable=False)
-
-class GoldCrimesByDepartment(Base):
-    __tablename__ = "gold_crimes_by_department"
-    cod_depto = Column(String(2), primary_key=True)
-    departamento = Column(String(100), nullable=False)
-    total_crimes = Column(Integer, nullable=False)
-
-class GoldCrimesByCalendar(Base):
-    __tablename__ = "gold_crimes_by_calendar"
-    __table_args__ = (
-        PrimaryKeyConstraint("year", "quarter", "month", "weekday_num"),
-    )
-    year = Column(Integer, nullable=False)
-    quarter = Column(Integer, nullable=False)
-    month = Column(Integer, nullable=False)
-    weekday_num = Column(Integer, nullable=False)
-    weekday_name = Column(String(10), nullable=False)
-    total_crimes = Column(Integer, nullable=False)
-
-class GoldCrimesByElectoralPeriod(Base):
-    __tablename__ = "gold_crimes_by_electoral_period"
-    electoral_period = Column(String(20), primary_key=True)
-    period_order = Column(Integer, nullable=False)
-    year_min = Column(Integer, nullable=False)
-    year_max = Column(Integer, nullable=False)
-    total_crimes = Column(Integer, nullable=False)
-    pct_of_total = Column(Numeric(6, 2), nullable=False)
-```
+The four tables and their columns are catalogued in `README.md`; the models live in `violence_etl/models.py`.
 
 Object mapping to the requirement:
 - a. top 5 departments by total crimes -> `gold_top5_departments` (`rank` 1..5, ordered by `total_crimes DESC`, tie-break `departamento ASC`).
@@ -568,19 +516,7 @@ Each migration has a working `downgrade`.
 
 `violence_etl/cli.py` uses `argparse` (stdlib, identical on 3.8/3.14). Entry point: `python -m violence_etl.cli <command>`.
 
-Commands:
-- `init-db`: run `alembic upgrade head` for the configured backend.
-- `download`: fetch the CSV to `data/bronze/landing` and print the sha256.
-- `ingest-bronze [--csv-path PATH] [--force]`: run bronze only.
-- `build-silver [--sha SHA] [--force]`: run silver only.
-- `build-gold`: run gold only.
-- `run-all [--csv-path PATH] [--force]`: bronze then silver then gold in order.
-- `validate`: read silver and gold and print the checks in the acceptance criteria.
-- `drop-db`: drop and recreate all `bronze_/silver_/gold_` tables (dev only, guarded by `--yes`).
-
-Global flags: `--backend postgres|sqlite`, `--sqlite-path PATH`, `--log-level LEVEL`. These override settings via env vars before `get_settings()` is called.
-
-`Makefile` aliases: `make install`, `make test`, `make init-db`, `make run-all`, `make lint`, `make sqlite-run` (runs the pipeline against `data/warehouse/violence_staging.db`).
+The command list, the per-command flags and the `Makefile` aliases are in `README.md`. Design note: the global flags (`--backend`, `--sqlite-path`, `--log-level`) are pushed into the environment before `get_settings()` is called, so the rest of the code path is unchanged.
 
 ## Logging
 
@@ -607,42 +543,44 @@ Every layer logs: start, input row count, output row count, dropped/rejected cou
 
 ## Test plan
 
-Runner: pytest 8.3.5 (spans 3.8..3.14). Config in `pyproject.toml`:
+Runner: pytest 8.3.5. Config in `pyproject.toml`:
 
 ```toml
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
 filterwarnings = ["ignore::DeprecationWarning"]
+markers = [
+    "full_dataset: runs against the real downloaded dataset when ETL_FULL_DATASET=1",
+]
 ```
 
+Current result on Python 3.14: 82 passed, 1 skipped.
+
 Fixtures in `tests/conftest.py`:
+- `clean_etl_env`: autouse, removes the ETL/PG env vars so defaults are deterministic.
 - `sqlite_engine`: creates a temp SQLite file under `tmp_path`, runs `Base.metadata.create_all`, yields the engine, disposes after.
-- `sample_csv`: path to `tests/fixtures/yi5j-5fe9_sample.csv` (about 40 hand-built rows covering both zones, both duplicate and distinct rows, all four period types, edge dates).
+- `settings_sqlite`: Settings pointed at the temp SQLite file and a temp bronze dir.
+- `sample_csv`: path to `tests/fixtures/yi5j-5fe9_sample.csv` (40 hand-built rows covering both zones, both duplicate and distinct rows, all four period types, edge dates).
 - `bad_csv`: path to `tests/fixtures/yi5j-5fe9_bad.csv` (empty date, non numeric code, unexpected `ZONA`, `DD/MM` vs `MM/DD` ambiguity, null municipio).
+- `many_depts_csv`: path to `tests/fixtures/yi5j-5fe9_many_depts.csv` (7 departments, for top-5 truncation).
 
 Unit tests:
-- `test_periods.py`: the full 2003..2026 table above asserted year by year; the reference cycle `{2013: pre-electoral, 2014: electoral, 2015: post-electoral, 2016: intermediate, 2017: pre-electoral}`; `2002 -> electoral`, `2026 -> electoral`; `2000 -> unclassified`; a non-4-year `ELECTION_YEARS` triggers `is_cycle_valid` False.
+- `test_periods.py`: the full 2003..2026 table asserted year by year; the reference cycle `{2013: pre-electoral, 2014: electoral, 2015: post-electoral, 2016: intermediate, 2017: pre-electoral}`; `2002 -> electoral`, `2026 -> electoral`, `2001 -> pre-electoral`; `2000 -> unclassified`; a non-4-year `ELECTION_YEARS` triggers `is_cycle_valid` False.
 - `test_schema.py`: exact expected header list, order, and case; mismatch raises `SchemaError`.
-- `test_settings.py`: defaults when env is empty; overrides via `monkeypatch.setenv`; `database_url` returns the `postgresql+psycopg://` and `sqlite:///` forms correctly; invalid values (`PGPORT`) raise.
-- `test_silver.py`: all R1..R13 rules individually; zero padding preserved on load (assert `cod_depto == "05"`, `cod_muni == "05660"`); date `31/08/2026` parses to `2026-08-31`; `11/12/2024` parses as 11 Dec not 12 Nov; exact-duplicate rows collapse (3 identical -> 1); `dedup_mode="sum"` sums instead; rejected rows land in `silver_rejected_rows` with the expected reason; `total_crimes` after dedup equals the distinct count on the sample.
-- `test_bronze.py`: header validation; `keep_default_na=False` keeps empty strings as empty strings; content hash stable; re-ingest of the same sha skips.
-- `test_gold.py`: top 5 ordering and rank values on the sample; `gold_crimes_by_department` totals equal the silver total; `gold_crimes_by_calendar` grain uniqueness; `gold_crimes_by_electoral_period` `pct_of_total` sums to about 100.
+- `test_settings.py`: defaults when env is empty; overrides via `monkeypatch.setenv`; `database_url` and `database_url_object` return the `postgresql+psycopg://` and `sqlite:///` forms; `DATABASE_URL` override wins and infers the backend; passwords with special characters round-trip and are masked in `database_url_display`; `repr(settings)` hides the password; the Alembic config keeps `%` out of `ConfigParser`; invalid `PGPORT` raises.
+- `test_silver.py`: all R1..R13 rules individually; zero padding preserved on load (assert `cod_depto == "05"`, `cod_muni == "05660"`); date `31/08/2026` parses to `2026-08-31`; `11/12/2024` parses as 11 Dec not 12 Nov; exact-duplicate rows collapse (3 identical -> 1); `dedup_mode="sum"` sums instead; rejected rows land in `silver_rejected_rows` with the expected reason; `inserted_rows` tracks actual writes (second run is 0); a new snapshot purges the previous sha.
+- `test_bronze.py`: header validation; `keep_default_na=False` keeps empty strings as empty strings; content hash stable; re-ingest of the same sha skips and updates the single log row; `--force` reloads without growing the log.
+- `test_gold.py`: top 5 ordering and rank values on the sample; `gold_crimes_by_department` totals equal the silver total; `gold_crimes_by_calendar` grain uniqueness; `gold_crimes_by_electoral_period` `pct_of_total` sums to about 100; top-5 truncates when more than five departments exist; the period order matches the expected labels; `export_csv=True` writes all four files.
 
 Integration test `test_pipeline_sqlite.py`:
 - Uses a real temp SQLite file and the committed `sample_csv` fixture.
 - Runs `run_all` once, asserts bronze row count equals the CSV data row count, silver row count equals distinct business rows, `silver_rejected_rows` count matches the expected rejects, and gold tables are populated.
-- Runs `run_all` a second time and asserts no row counts change (idempotency).
+- Runs `run_all` a second time and asserts no row counts change (idempotency), including with rejected rows.
 - Asserts the grand total from `gold_crimes_by_department` equals the grand total from `gold_crimes_by_electoral_period` equals the sum of silver `cantidad`.
-- Optional slow marker `@pytest.mark.full_dataset` to run against the real downloaded file when `ETL_FULL_DATASET=1`; skipped by default so CI stays fast and offline.
+- Slow marker `@pytest.mark.full_dataset` runs against the real downloaded file when `ETL_FULL_DATASET=1`; skipped by default so CI stays fast and offline.
 
-Exact commands:
-
-```
-python -m pytest tests -q
-python -m pytest tests -q --cov=violence_etl --cov-report=term-missing
-python -m pytest tests/test_periods.py -q
-```
+Exact commands are in `README.md`.
 
 ## Notebook plan
 
@@ -698,23 +636,26 @@ data/gold/*
 
 # OS
 .DS_Store
+
+# Agent tooling
+.opencode/
 ```
 
 ## Commit sequence (atomic, one feature per commit)
 
 Never commit or push to `main`.
 
-1. `chore: initialize repository` -- `git init`, create branch `feat/etl-pipeline`, add `.gitignore`, `.env.example`, `README.md` skeleton, `docs/PLAN.md`.
-2. `chore(deps): pin runtime and dev requirements` -- add `requirements.txt`, `requirements-dev.txt`, `pyproject.toml` (pytest config), `Makefile`.
-3. `feat(config): add env-driven settings and logging` -- `violence_etl/__init__.py`, `settings.py`, `logging_conf.py`, `errors.py`, `tests/test_settings.py`.
-4. `feat(db): add sqlalchemy models and engine factory` -- `violence_etl/db.py`, `models.py`, `schema.py`.
-5. `feat(migrations): add alembic setup and bronze migration` -- `alembic.ini`, `migrations/env.py`, `migrations/script.py.mako`, `migrations/versions/0001_bronze.py`.
-6. `feat(bronze): download and land raw csv` -- `violence_etl/io.py`, `bronze.py`, `tests/fixtures/*.csv`, `tests/test_bronze.py`.
-7. `feat(silver): add period mapper` -- `violence_etl/periods.py`, `tests/test_periods.py`.
-8. `feat(silver): curate, dedup and validate` -- `migrations/versions/0002_silver.py`, `violence_etl/silver.py`, `tests/test_silver.py`.
-9. `feat(gold): add denormalized query tables` -- `migrations/versions/0003_gold.py`, `violence_etl/gold.py`, `tests/test_gold.py`.
-10. `feat(cli): orchestrate the full pipeline` -- `violence_etl/pipeline.py`, `cli.py`, `tests/test_pipeline_sqlite.py`.
-11. `docs: add analysis notebooks and usage guide` -- `notebooks/01_bronze_profiling.ipynb`, `02_silver_validation.ipynb`, `03_gold_analysis.ipynb`, finalize `README.md` with the period table and gold SQL.
+1. `chore: initialize repository`: `git init`, create branch `feat/etl-pipeline`, add `.gitignore`, `.env.example`, `README.md` skeleton, `docs/PLAN.md`.
+2. `chore(deps): pin runtime and dev requirements`: add `requirements.txt`, `requirements-dev.txt`, `pyproject.toml` (pytest config), `Makefile`.
+3. `feat(config): add env-driven settings and logging`: `violence_etl/__init__.py`, `settings.py`, `logging_conf.py`, `errors.py`, `tests/test_settings.py`.
+4. `feat(db): add sqlalchemy models and engine factory`: `violence_etl/db.py`, `models.py`, `schema.py`.
+5. `feat(migrations): add alembic setup and bronze migration`: `alembic.ini`, `migrations/env.py`, `migrations/script.py.mako`, `migrations/versions/0001_bronze.py`.
+6. `feat(bronze): download and land raw csv`: `violence_etl/io.py`, `bronze.py`, `tests/fixtures/*.csv`, `tests/test_bronze.py`.
+7. `feat(silver): add period mapper`: `violence_etl/periods.py`, `tests/test_periods.py`.
+8. `feat(silver): curate, dedup and validate`: `migrations/versions/0002_silver.py`, `violence_etl/silver.py`, `tests/test_silver.py`.
+9. `feat(gold): add denormalized query tables`: `migrations/versions/0003_gold.py`, `violence_etl/gold.py`, `tests/test_gold.py`.
+10. `feat(cli): orchestrate the full pipeline`: `violence_etl/pipeline.py`, `cli.py`, `tests/test_pipeline_sqlite.py`.
+11. `docs: add analysis notebooks and usage guide`: `notebooks/01_bronze_profiling.ipynb`, `02_silver_validation.ipynb`, `03_gold_analysis.ipynb`, finalize `README.md` with the period table and gold SQL.
 
 Run `make lint` (ruff, configured in `pyproject.toml`) and `python -m pytest tests -q` before each commit; both interpreters if available.
 

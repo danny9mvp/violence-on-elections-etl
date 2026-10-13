@@ -3,15 +3,64 @@
 Medallion (bronze/silver/gold) ETL for the Colombian electoral-violence
 dataset published on datos.gov.co (Socrata view `yi5j-5fe9`).
 
-The pipeline downloads the source CSV, lands it verbatim, mirrors it into a
-bronze table, curates and deduplicates it into a silver table, and builds
-small denormalized gold tables ready for SQL or BI queries.
+The pipeline downloads the source CSV, keeps it verbatim in a landing area,
+mirrors it into a bronze table, curates and deduplicates it into silver, and
+builds small denormalized gold tables ready for SQL or BI queries.
 
-One codebase runs against PostgreSQL (warehouse) and SQLite (staging/tests).
+One codebase targets PostgreSQL (the warehouse) and SQLite (staging and tests).
 The target is selected with environment variables, so no code change is needed
-to switch. See `docs/PLAN.md` for the full design.
+to switch. The design and rationale live in `docs/PLAN.md`; this file is the
+usage guide.
 
-## Stack
+## Quickstart (SQLite)
+
+```
+python -m venv .venv
+.venv/bin/python -m pip install --upgrade pip
+.venv/bin/python -m pip install -r requirements-dev.txt
+
+.venv/bin/python -m violence_etl.cli --backend sqlite init-db
+.venv/bin/python -m violence_etl.cli --backend sqlite run-all
+.venv/bin/python -m violence_etl.cli --backend sqlite validate
+```
+
+The `--backend sqlite` flag keeps the quickstart self-contained, so it needs no
+PostgreSQL server. Without it, the commands target PostgreSQL. The first
+`run-all` downloads the source and needs network access. Expected tail of the
+first run:
+
+```
+run-all: bronze_status=loaded raw_rows=15696 silver_rows=14212 rejected=0 dropped_duplicates=1484 total_crimes=14212 gold_grand_total=14212
+```
+
+Expected `validate`:
+
+```
+[ok] bronze rows: 15696
+[ok] silver rows: 14212
+[ok] rejected rows: 0
+[ok] silver total == gold dept total: (14212, 14212)
+[ok] gold dept total == gold period total: (14212, 14212)
+[ok] top5 has 5 rows: 5
+[ok] by-department rows: 32
+[ok] period table has 4 rows: 4
+[ok] calendar grain unique: 0
+[ok] cod_depto is 2 chars: 05
+[ok] cod_muni is 5 chars: 05660
+validate: PASS
+```
+
+The pipeline is idempotent. A second `run-all` on the same source skips bronze
+and changes no row counts in any table:
+
+```
+run-all: bronze_status=skipped raw_rows=15696 silver_rows=14212 rejected=0 dropped_duplicates=1484 total_crimes=14212 gold_grand_total=14212
+```
+
+The corresponding `silver:` log line on that second run reports `inserted=0`,
+because the insert rowcount is zero when every business key already exists.
+
+## Stack and compatibility
 
 Python 3.8 through 3.14 from one source tree, PostgreSQL LTS as warehouse,
 SQLite for staging and tests, Alembic migrations, SQLAlchemy ORM, Pandas,
@@ -23,6 +72,26 @@ Compatibility rules used in the code: `from __future__ import annotations`,
 schemas). `requirements.txt` uses environment markers because no single
 pandas/numpy pin spans 3.8 to 3.14 with wheels.
 
+The runtime pins:
+
+```
+SQLAlchemy==2.0.44
+alembic==1.14.1
+psycopg==3.2.10
+psycopg-binary==3.2.10
+numpy==1.24.4;      python_version < "3.9"
+pandas==2.0.3;      python_version < "3.9"
+numpy==2.0.2;       python_version >= "3.9" and python_version < "3.11"
+pandas==2.3.3;      python_version >= "3.9"
+numpy==2.3.2;       python_version >= "3.11"
+requests==2.31.0
+python-dotenv==1.0.1
+```
+
+`requirements-dev.txt` adds `pytest`, `ruff`, `pytest-cov`, `coverage` and the
+Jupyter stack (`jupyterlab`, `notebook`, `ipykernel`). The coverage and Jupyter
+pins are split by interpreter range with the same markers.
+
 ## Install
 
 ```
@@ -31,8 +100,8 @@ python -m venv .venv
 .venv/bin/python -m pip install -r requirements-dev.txt
 ```
 
-`requirements.txt` holds runtime dependencies, `requirements-dev.txt` adds
-pytest, coverage, ruff and the Jupyter stack.
+`requirements.txt` holds runtime dependencies, `requirements-dev.txt` adds the
+dev and notebook tools. `make install` runs the last two commands.
 
 ## Configuration
 
@@ -48,61 +117,198 @@ gitignored). `.env.example` lists them with the defaults.
 | `PGPASSWORD` | `postgres` | warehouse password |
 | `PGDATABASE` | `violence` | warehouse database |
 | `ETL_SQLITE_PATH` | `data/warehouse/violence_staging.db` | staging/test SQLite file |
-| `ETL_SOURCE_URL` | the Socrata export URL | download source |
+| `ETL_SOURCE_URL` | `http://www.datos.gov.co/api/v3/views/yi5j-5fe9/export.csv` | download source |
 | `ETL_LOG_LEVEL` | `INFO` | root log level |
 | `ETL_DEDUP_MODE` | `drop` | `drop` or `sum` duplicate policy |
 | `ETL_BRONZE_DIR` | `data/bronze` | landing/raw root |
 | `DATABASE_URL` | unset | full URL override, takes precedence |
 
-`DATABASE_URL` is honored verbatim when set; otherwise the URL is built from
-`ETL_DB_BACKEND` and the PG or SQLite variables. The PostgreSQL dialect is
-`postgresql+psycopg://` (psycopg 3). Credentials are assembled with
-`sqlalchemy.engine.URL.create` and handed to the engine and to Alembic as a URL
-object, so passwords containing `@`, `:`, `/` or `%` work and are never parsed
-by `ConfigParser`.
+How the database URL is chosen:
 
-## Usage
+1. If `DATABASE_URL` is set, it is used as-is. It wins over `ETL_DB_BACKEND`,
+   the `PG*` variables and `ETL_SQLITE_PATH` (including the `--sqlite-path`
+   flag). When `ETL_DB_BACKEND` is unset, the backend is inferred from the URL
+   scheme (`sqlite...` or `postgres...`).
+2. Otherwise `ETL_DB_BACKEND=sqlite` builds `sqlite:///<ETL_SQLITE_PATH>`.
+3. Otherwise the PostgreSQL dialect `postgresql+psycopg://` (psycopg 3) is
+   built from the `PG*` variables.
+
+Connection details are assembled with `sqlalchemy.engine.URL` objects (via
+`URL.create`) and handed to the engine and to Alembic as an object, so
+passwords containing `@`, `:`, `/` or `%` work and never pass through
+`ConfigParser` interpolation. `database_url_display` masks the password in
+logs. The CLI connection flags are `--backend postgres|sqlite` and
+`--sqlite-path PATH`; the PostgreSQL host, port, user, password and database
+are set only through the `PG*` environment variables or `DATABASE_URL`.
+
+## Running against PostgreSQL
+
+PostgreSQL is the intended warehouse. The defaults match a local instance
+(`localhost:5432`, user `postgres`, password `postgres`, database `violence`).
 
 ```
-# Everything against SQLite, no PostgreSQL needed
-python -m violence_etl.cli --backend sqlite init-db
-python -m violence_etl.cli --backend sqlite run-all
-python -m violence_etl.cli --backend sqlite validate
+createdb -U postgres violence
 
-# Against the PostgreSQL warehouse
+export ETL_DB_BACKEND=postgres
+export PGHOST=localhost PGPORT=5432 PGUSER=postgres PGPASSWORD=postgres PGDATABASE=violence
+
 python -m violence_etl.cli init-db
 python -m violence_etl.cli run-all
+python -m violence_etl.cli validate
 ```
 
-Commands:
+`init-db` runs the migrations. The equivalent direct Alembic command, from the
+repository root with the same environment, is:
 
-- `init-db`: run `alembic upgrade head` for the configured backend.
-- `download`: fetch the CSV to `data/bronze/landing` and print the sha256.
-- `ingest-bronze [--csv-path PATH] [--force]`: bronze only.
-- `build-silver [--sha SHA] [--force]`: silver only.
-- `build-gold [--export-csv]`: gold only.
-- `run-all [--csv-path PATH] [--force] [--export-csv]`: bronze, silver, gold.
-- `validate`: print the acceptance checks.
-- `drop-db --yes`: drop and recreate all tables (dev only).
+```
+alembic upgrade head
+```
 
-Global flags, placed before the command: `--backend postgres|sqlite`,
-`--sqlite-path PATH`, `--log-level LEVEL`.
+`migrations/env.py` reads `violence_etl.settings`, so the same migration history
+runs on both engines. The history has four revisions: `0001_bronze`,
+`0002_silver`, `0003_gold` and `0004_bronze_ingestion_unique`, which adds
+`UNIQUE(source_sha256)` to `bronze_ingestion_log`. Useful Alembic commands:
+`alembic current`, `alembic history`, `alembic downgrade base`.
 
-Makefile aliases: `make install`, `make test`, `make lint`, `make init-db`,
-`make run-all`, `make sqlite-run`.
+## CLI reference
 
-## Layers
+Entry point: `python -m violence_etl.cli <command>`. Global flags go before the
+command:
 
-- Raw landing originals: `data/bronze/landing/<sha256>.csv` (verbatim bytes,
-  never edited) plus a run-stamped copy in `data/bronze/raw/`.
+- `--backend postgres|sqlite`: sets `ETL_DB_BACKEND` for this run.
+- `--sqlite-path PATH`: sets `ETL_SQLITE_PATH` for this run.
+- `--log-level LEVEL`: sets `ETL_LOG_LEVEL` for this run.
+
+Commands and their flags:
+
+| Command | Flags | What it does |
+| --- | --- | --- |
+| `init-db` | none | run `alembic upgrade head` for the configured backend |
+| `download` | none | fetch the CSV to `data/bronze/landing` and print the sha256 |
+| `ingest-bronze` | `--csv-path PATH`, `--force` | load bronze only |
+| `build-silver` | `--sha SHA`, `--force` | build silver only |
+| `build-gold` | `--export-csv` | build gold only |
+| `run-all` | `--csv-path PATH`, `--force`, `--export-csv` | bronze, then silver, then gold |
+| `validate` | none | print the acceptance checks |
+| `drop-db` | `--yes` | drop and recreate all tables (dev only) |
+
+Notes:
+
+- Without `--csv-path`, `ingest-bronze` and `run-all` download
+  `ETL_SOURCE_URL`. With it, they read that local file and still hash its bytes.
+- `--force` on bronze reloads the raw rows; on silver it rebuilds the active
+  snapshot. See the idempotency section.
+- `--sha` on `build-silver` picks a specific bronze snapshot; the default is the
+  most recent snapshot in `bronze_crimes_raw`.
+- `build-gold --export-csv` writes `data/gold/*.csv` in addition to the tables.
+- `drop-db` refuses to run without `--yes` and returns exit code 2.
+
+## Tables
+
+A migrated database has nine tables: the eight application tables below plus
+the Alembic bookkeeping table `alembic_version`.
+
+Landing and raw artifacts on disk:
+
+- `data/bronze/landing/<sha256>.csv`: the verbatim downloaded bytes, named by
+  content hash, never edited.
+- `data/bronze/raw/yi5j-5fe9_<utcstamp>.csv`: a run-stamped copy referenced by
+  the ingestion log.
+- `data/gold/*.csv`: optional exports written by `--export-csv`.
+
+Bronze tables:
+
 - `bronze_crimes_raw`: every source field stored as text plus ingestion
-  metadata (`source_url`, `source_file`, `source_sha256`, `load_ts`, `row_num`).
-- `bronze_ingestion_log`: one row per source content hash, holding the outcome
-  (`loaded` or `skipped`) of the most recent attempt; reloads update that row.
+  metadata. Columns: `raw_id` (primary key), `source_sha256`, `source_file`,
+  `source_url`, `load_ts`, `row_num` (1-based), `fecha_hecho_raw`,
+  `cod_depto_raw`, `departamento_raw`, `cod_muni_raw`, `municipio_raw`,
+  `zona_raw`, `cantidad_raw`. Unique on `(source_sha256, row_num)`.
+- `bronze_ingestion_log`: one row per source content hash. Columns:
+  `ingestion_id` (primary key), `source_url`, `source_file`, `source_sha256`
+  (unique), `row_count`, `status` (`loaded`, `skipped` or `failed`), `message`,
+  `loaded_at`. Reloads update this row in place, so it never grows on repeated
+  attempts.
+
+Silver tables:
+
 - `silver_crimes`: typed, trimmed, uppercased, code-preserving, deduplicated,
-  validated, calendar-enriched rows.
+  validated, calendar-enriched rows. Columns: `id` (primary key),
+  `fecha_hecho`, `cod_depto`, `departamento`, `cod_muni`, `municipio`, `zona`,
+  `cantidad`, `year`, `month`, `quarter`, `weekday_num`, `weekday_name`,
+  `electoral_period`, `row_hash`, `source_sha256`, `silver_loaded_at`. Unique on
+  `(fecha_hecho, cod_depto, cod_muni, zona, cantidad)`. Holds a single active
+  snapshot: rows for other `source_sha256` values are purged on load.
 - `silver_rejected_rows`: every rejected row with a reason and its raw values.
-- `gold_*`: four denormalized tables, rebuilt by full refresh.
+  Columns: `id` (primary key), `source_sha256`, `row_num`, `reject_reason`,
+  `raw_values` (JSON string), `rejected_at`.
+
+## Gold table catalogue
+
+Gold is rebuilt by full refresh (delete then aggregate-insert) from the active
+silver snapshot, so it always converges to the same content. Each table below
+lists its columns and the question it answers.
+
+`gold_top5_departments`: top 5 departments by total crimes. Columns: `rank`
+(primary key, 1..5), `cod_depto`, `departamento`, `total_crimes`. Ranked by
+`total_crimes DESC`, ties broken by `departamento ASC`.
+
+```sql
+SELECT rank, departamento, total_crimes
+FROM gold_top5_departments
+ORDER BY rank;
+```
+
+`gold_crimes_by_department`: total crimes for every department. Columns:
+`cod_depto` (primary key), `departamento`, `total_crimes`.
+
+```sql
+SELECT cod_depto, departamento, total_crimes
+FROM gold_crimes_by_department
+ORDER BY total_crimes DESC;
+```
+
+`gold_crimes_by_calendar`: total crimes per calendar bucket. Columns: `year`,
+`quarter`, `month`, `weekday_num` (composite primary key), `weekday_name`,
+`total_crimes`. Grain is `year x quarter x month x weekday_num`, unique.
+
+```sql
+SELECT year, quarter, month, weekday_num, weekday_name, total_crimes
+FROM gold_crimes_by_calendar
+ORDER BY year, quarter, month, weekday_num;
+```
+
+`gold_crimes_by_electoral_period`: total crimes per electoral period. Columns:
+`electoral_period` (primary key), `period_order`, `year_min`, `year_max`,
+`total_crimes`, `pct_of_total`. `period_order` uses the presentation order
+post, intermediate, pre, electoral. `pct_of_total` is the share of the grand
+total, rounded to 2 decimals.
+
+```sql
+SELECT electoral_period, period_order, year_min, year_max,
+       total_crimes, pct_of_total
+FROM gold_crimes_by_electoral_period
+ORDER BY period_order;
+```
+
+Equivalent plain SQL over `silver_crimes`:
+
+```sql
+-- total crimes by department
+SELECT cod_depto, departamento, SUM(cantidad) AS total_crimes
+FROM silver_crimes
+GROUP BY cod_depto, departamento
+ORDER BY total_crimes DESC;
+
+-- total crimes by year, quarter, month and weekday
+SELECT year, quarter, month, weekday_num, weekday_name, SUM(cantidad) AS total_crimes
+FROM silver_crimes
+GROUP BY year, quarter, month, weekday_num, weekday_name;
+
+-- total crimes by electoral period
+SELECT electoral_period, SUM(cantidad) AS total_crimes
+FROM silver_crimes
+GROUP BY electoral_period;
+```
 
 ## Cleaning and deduplication
 
@@ -115,7 +321,7 @@ reject a `cod_depto` that is not the first two characters of `cod_muni`; then
 deduplicate. Every empty value, including an empty code, is reported as
 `null_field`; the type rules only flag non-empty invalid values. Every rejected
 row is written to `silver_rejected_rows` with a reason, so nothing is silently
-lost.
+lost. The literal rule order is documented in `docs/PLAN.md`.
 
 Deduplication is keyed on `(fecha_hecho, cod_depto, cod_muni, zona, cantidad)`,
 because `departamento` and `municipio` are functionally dependent on the codes.
@@ -127,9 +333,9 @@ dataset this removes 1,484 exact duplicates: 15,696 raw rows become 14,212
 silver rows and the crime total goes from 15,696 to 14,212.
 
 `ETL_DEDUP_MODE=sum` groups by the key without `cantidad` and sums `CANTIDAD`.
-On this dataset it reproduces 15,696 as the crime total while still collapsing
-to 14,212 rows. It is intended for datasets where `CANTIDAD` is a real
-magnitude and duplicate rows are partial reports.
+On this dataset it keeps 14,212 rows and a total of 15,696, because every
+duplicate group sums back to its own count. It is intended for datasets where
+`CANTIDAD` is a real magnitude and duplicate rows are partial reports.
 
 ## Electoral period mapping
 
@@ -153,38 +359,33 @@ The mapper uses Colombian general elections every 4 years (2002, 2006, 2010,
 | 2013 | pre-electoral | 2025 | pre-electoral |
 | 2014 | electoral | 2026 | electoral |
 
-The full table 2003..2026 is asserted in `tests/test_periods.py`, so the mapper
-cannot silently drift. Every year in the data range is classified.
+Every year in the data range is classified. The full table is asserted in
+`tests/test_periods.py`, so the mapper cannot silently drift.
 
-## Gold tables
+## Idempotency and reload semantics
 
-- `gold_top5_departments`: `rank` 1..5, ordered by `total_crimes DESC`, tie
-  broken by `departamento ASC`.
-- `gold_crimes_by_department`: all departments, total crimes.
-- `gold_crimes_by_calendar`: grain `year x quarter x month x weekday`.
-- `gold_crimes_by_electoral_period`: `period_order` uses the presentation order
-  post, intermediate, pre, electoral; `pct_of_total` is the share of the grand
-  total, rounded to 2 decimals.
+The pipeline is safe to run repeatedly.
 
-Equivalent plain SQL:
+- Bronze is keyed on the content sha256. Reload detection uses the presence of
+  raw rows, not the log status: if `bronze_crimes_raw` already holds rows for
+  that hash and `--force` is not set, the raw rows are left untouched and the
+  single `bronze_ingestion_log` row for that hash is updated in place with
+  `status="skipped"`. `--force` reloads the raw rows and updates that same log
+  row with `status="loaded"`, so the log never grows on repeated attempts.
+- Silver holds exactly one active snapshot: the rows for the active sha256. On
+  each run rows from any other sha256 are purged, then the current snapshot is
+  inserted with business-key conflicts ignored (`ON CONFLICT DO NOTHING` on
+  PostgreSQL, `INSERT OR IGNORE` on SQLite). Loading an updated export replaces
+  the previous one instead of mixing snapshots, and a second run of the same
+  export writes zero new rows. Reported counts come from the database after the
+  write: `inserted_rows` is the insert rowcount and `silver_rows`/`total_crimes`
+  are read back from the active snapshot.
+- `silver_rejected_rows` is rebuilt for the active sha256 on every run.
+- Gold is a full refresh (delete then aggregate-insert), so it always converges
+  to the same content and always reflects the single active snapshot.
 
-```sql
--- total crimes by department
-SELECT cod_depto, departamento, SUM(cantidad) AS total_crimes
-FROM silver_crimes
-GROUP BY cod_depto, departamento
-ORDER BY total_crimes DESC;
-
--- total crimes by year, quarter, month and weekday
-SELECT year, quarter, month, weekday_num, weekday_name, SUM(cantidad) AS total_crimes
-FROM silver_crimes
-GROUP BY year, quarter, month, weekday_num, weekday_name;
-
--- total crimes by electoral period
-SELECT electoral_period, SUM(cantidad) AS total_crimes
-FROM silver_crimes
-GROUP BY electoral_period;
-```
+A second `run-all` on the same source logs `skipped` at bronze and changes no
+row counts in any table.
 
 ## Tests
 
@@ -194,38 +395,66 @@ python -m pytest tests -q --cov=violence_etl --cov-report=term-missing
 python -m pytest tests/test_periods.py -q
 ```
 
-The suite runs fully offline against SQLite using the committed fixtures. A
-slow, network-backed test is skipped unless `ETL_FULL_DATASET=1` is set:
+The suite runs fully offline against SQLite using the committed fixtures. The
+current result is 82 passed and 1 skipped. The skipped test is a slow,
+network-backed run against the real dataset; enable it with `ETL_FULL_DATASET=1`:
 
 ```
 ETL_FULL_DATASET=1 python -m pytest tests -q -m full_dataset
 ```
 
+`make test` runs `python -m pytest tests -q`, and `make lint` runs
+`python -m ruff check .`.
+
 ## Notebooks
 
-The notebooks under `notebooks/` are meant to be run from PyCharm using the IDE
-Managed Jupyter server with the project `.venv` as the kernel. See
-`notebooks/README.md` for details.
+The notebooks under `notebooks/` are meant to be run on the PyCharm IDE Managed
+Jupyter server, with the project `.venv` as the kernel. No separate
+`jupyter notebook` process is needed.
 
-## Idempotency and reload semantics
+1. Open the project in PyCharm and go to `Settings > Project > Python Interpreter`.
+2. Select the project virtualenv `.venv` as the interpreter.
+3. If PyCharm offers to install the Jupyter section, accept. PyCharm then
+   starts and manages the Jupyter server for you.
+4. Open a notebook. In the notebook toolbar, choose the managed server as the
+   Jupyter server and select the project `.venv` interpreter as the kernel.
+5. Run the cells, starting with the bootstrap cell.
 
-The pipeline is safe to run repeatedly.
+The notebook stack lives in `requirements-dev.txt`. See `notebooks/README.md`
+for the notebook list and prerequisites.
 
-- Bronze is keyed on the content sha256. Re-reading identical bytes is a no-op:
-  the raw rows are left untouched and the single `bronze_ingestion_log` row for
-  that hash is updated in place with `status="skipped"`. `--force` reloads the
-  raw rows and updates the same log row with `status="loaded"`, so the log never
-  grows on repeated attempts.
-- Silver holds exactly one active snapshot: the rows for the active sha256. On
-  each run rows from any other sha256 are purged, then the current snapshot is
-  upserted (business-key conflicts are ignored). Loading an updated export
-  therefore replaces the previous one instead of mixing snapshots, and a second
-  run of the same export writes zero new rows. Reported counts come from the
-  database after the write: `inserted_rows` is the insert rowcount and
-  `silver_rows`/`total_crimes` are read back from the active snapshot.
-- `silver_rejected_rows` is rebuilt for the active sha256 on every run.
-- Gold is a full refresh (delete then aggregate-insert), so it always converges
-  to the same content and always reflects the single active snapshot.
+## Makefile
 
-A second `run-all` on the same source logs `skipped` at bronze and changes no
-row counts in any table.
+- `make install`: upgrade pip and install `requirements-dev.txt`.
+- `make test`: `python -m pytest tests -q`.
+- `make lint`: `python -m ruff check .`.
+- `make init-db`: `python -m violence_etl.cli init-db`.
+- `make run-all`: `python -m violence_etl.cli run-all`.
+- `make sqlite-run`: `init-db` then `run-all` against
+  `data/warehouse/violence_staging.db` with `--backend sqlite`.
+
+## Troubleshooting
+
+- `init-db` cannot connect to PostgreSQL: check `PGHOST`, `PGPORT`, `PGUSER`,
+  `PGPASSWORD`, `PGDATABASE` or `DATABASE_URL`, and make sure the database
+  exists and the server is running.
+- A password with `%`, `@`, `:` or `/` causes a connection error: the built URL
+  handles these characters. If you set `DATABASE_URL` yourself, percent-encode
+  the password.
+- `--sqlite-path` seems ignored: `DATABASE_URL` takes precedence. Unset it when
+  the CLI flags should decide the target.
+- A repeat run does not reload bronze: use `--force`.
+- `SchemaError` on ingest: the CSV header must match
+  `FECHA HECHO,COD_DEPTO,DEPARTAMENTO,COD_MUNI,MUNICIPIO,ZONA,CANTIDAD` exactly,
+  in order and case.
+- A notebook cannot import `violence_etl`: run the bootstrap cell first, which
+  adds the repository root to `sys.path` and forces SQLite.
+
+## Known limitations
+
+- The PostgreSQL path is implemented and covered by URL and offline-migration
+  tests, but it has not been executed locally. Local runs use SQLite.
+- The code and dependency markers target Python 3.8 through 3.14, but only
+  Python 3.14 has been executed locally. Versions 3.8 through 3.13 have not
+  been run here.
+- The `full_dataset` test needs network access and `ETL_FULL_DATASET=1`.

@@ -5,17 +5,19 @@ Exploratory and validation notebooks for the Violence on Elections ETL.
 ## How to run them
 
 The intended way to run these notebooks is the PyCharm IDE Managed Jupyter
-server:
+server, with the project `.venv` as the kernel:
 
 1. Open the project in PyCharm and go to `Settings > Project > Python Interpreter`.
 2. Select the project virtualenv `.venv` as the interpreter.
-3. Install the Jupyter section when PyCharm offers it. PyCharm then starts and
-   manages the Jupyter server for you.
-4. Open any `.ipynb` file and run the cells. The kernel is the project `.venv`.
+3. If PyCharm offers to install the Jupyter section, accept. PyCharm then starts
+   and manages the Jupyter server for you.
+4. Open a notebook. In the notebook toolbar, choose the managed server as the
+   Jupyter server and select the project `.venv` interpreter as the kernel.
+5. Run the cells, starting with the bootstrap cell.
 
 No separate `jupyter notebook` process is required. The notebook stack
 (`jupyterlab`, `notebook`, `ipykernel`) lives in `requirements-dev.txt` so it
-does not leak into the production environment.
+does not leak into the production environment. `README.md` has the same steps.
 
 ## Notes
 
