@@ -8,6 +8,7 @@ from sqlalchemy import func, select
 from violence_etl.db import make_engine
 from violence_etl.models import (
     BronzeCrimesRaw,
+    BronzeIngestionLog,
     GoldCrimesByCalendar,
     GoldCrimesByDepartment,
     GoldCrimesByElectoralPeriod,
@@ -20,6 +21,7 @@ from violence_etl.settings import get_settings
 
 TABLES = [
     BronzeCrimesRaw,
+    BronzeIngestionLog,
     SilverCrimes,
     SilverRejectedRows,
     GoldTop5Departments,
@@ -81,7 +83,24 @@ def test_run_all_is_idempotent(tmp_path, monkeypatch, sample_csv):
 
     assert first == second
     assert second["bronze_crimes_raw"] == 40
+    assert second["bronze_ingestion_log"] == 1
     assert second["silver_crimes"] == 32
+    assert second["silver_rejected_rows"] == 0
+
+
+def test_run_all_is_idempotent_with_rejected_rows(tmp_path, monkeypatch, bad_csv):
+    engine, settings = _integ_engine(tmp_path, monkeypatch)
+
+    run_all(engine, settings, csv_path=bad_csv)
+    first = _all_counts(engine)
+    run_all(engine, settings, csv_path=bad_csv)
+    second = _all_counts(engine)
+
+    # Both tables named in the assignment (log + rejects) stay stable.
+    assert first == second
+    assert second["bronze_ingestion_log"] == 1
+    assert second["silver_crimes"] == 0
+    assert second["silver_rejected_rows"] == 12
 
 
 def test_grand_totals_agree(tmp_path, monkeypatch, sample_csv):
