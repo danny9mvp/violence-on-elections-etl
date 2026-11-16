@@ -44,5 +44,4 @@ data/gold/*
 .opencode/
 
 # Notebook prototyping
-notebooks/
-notebooks/*.ipynb
+/notebooks/*.ipynb
