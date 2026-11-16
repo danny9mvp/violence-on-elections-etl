@@ -149,6 +149,12 @@ def _clean(frame: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
+def _valid_with_sum_quantity(valid: pd.DataFrame) -> pd.DataFrame:
+    group_key = ["fecha_hecho", "cod_depto", "departamento", "cod_muni", "municipio", "zona"]
+    return valid.groupby(group_key).agg({
+        "cantidad": "sum",
+    }).reset_index()
+
 
 def _dedup(valid: pd.DataFrame, mode: str) -> pd.DataFrame:
     """R9: collapse exact duplicate business rows."""
@@ -263,7 +269,9 @@ def build_silver(
     valid = cleaned[~reject_mask]
 
     valid_before = int(len(valid))
-    deduped = _dedup(valid, settings.dedup_mode)
+
+    with_sum_quantity = _valid_with_sum_quantity(valid)
+    deduped = _dedup(with_sum_quantity, settings.dedup_mode)
     dropped = valid_before - int(len(deduped))
 
     enriched = _enrich(deduped, sha)
