@@ -42,3 +42,6 @@ data/gold/*
 
 # Agent tooling
 .opencode/
+
+# Notebook prototyping
+notebooks/
