@@ -5,19 +5,17 @@ import os
 import pytest
 from sqlalchemy import func, select
 
-from violence_etl.db import make_engine
-from violence_etl.models import (
-    BronzeCrimesRaw,
-    BronzeIngestionLog,
-    GoldCrimesByCalendar,
-    GoldCrimesByDepartment,
-    GoldCrimesByElectoralPeriod,
-    GoldTop5Departments,
-    SilverCrimes,
-    SilverRejectedRows,
-)
+from violence_etl.db.connection import make_engine
+from violence_etl.db.models.bronze_crimes_raw import BronzeCrimesRaw
+from violence_etl.db.models.bronze_ingestion_log import BronzeIngestionLog
+from violence_etl.db.models.gold_crimes_by_calendar import GoldCrimesByCalendar
+from violence_etl.db.models.gold_crimes_by_department import GoldCrimesByDepartment
+from violence_etl.db.models.gold_crimes_by_electoral_period import GoldCrimesByElectoralPeriod
+from violence_etl.db.models.gold_top_50_departments import GoldTop5Departments
+from violence_etl.db.models.silver_crimes import SilverCrimes
+from violence_etl.db.models.silver_rejected_rows import SilverRejectedRows
 from violence_etl.pipeline import run_all
-from violence_etl.settings import get_settings
+from violence_etl.config.settings import get_settings
 
 TABLES = [
     BronzeCrimesRaw,
@@ -47,7 +45,7 @@ def _integ_engine(tmp_path, monkeypatch):
     monkeypatch.setenv("ETL_BRONZE_DIR", str(tmp_path / "bronze"))
     settings = get_settings()
     engine = make_engine(settings=settings)
-    from violence_etl.models import Base
+    from violence_etl.db.models.base_model import Base
 
     Base.metadata.create_all(engine)
     return engine, settings
@@ -156,7 +154,7 @@ def test_cli_drop_db_requires_yes(tmp_path, monkeypatch, sample_csv):
     from sqlalchemy import inspect
 
     from violence_etl.cli import main
-    from violence_etl.models import Base
+    from violence_etl.db.models.base_model import Base
 
     db_path = tmp_path / "cli2.db"
     base = ["--backend", "sqlite", "--sqlite-path", str(db_path)]

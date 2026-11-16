@@ -15,11 +15,12 @@ import pandas as pd
 from sqlalchemy import delete, func, insert, select
 from sqlalchemy.engine import Engine
 
-from violence_etl import io as etl_io
-from violence_etl.models import BronzeCrimesRaw, BronzeIngestionLog
-from violence_etl.schema import COLUMN_MAP, validate_header
-from violence_etl.settings import Settings
-from violence_etl.timeutil import naive_utc_now
+from violence_etl.utils import io as etl_io
+from violence_etl.db.models.bronze_crimes_raw import BronzeCrimesRaw
+from violence_etl.db.models.bronze_ingestion_log import BronzeIngestionLog
+from violence_etl.utils.schema import COLUMN_MAP, validate_header
+from violence_etl.config.settings import Settings
+from violence_etl.utils.timeutil import naive_utc_now
 
 logger = logging.getLogger(__name__)
 

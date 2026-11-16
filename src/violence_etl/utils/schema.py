@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Tuple
 
-from violence_etl.errors import SchemaError
+from violence_etl.exceptions.schema_exception import SchemaException
 
 # Exact expected header, in order, case sensitive.
 EXPECTED_HEADER: Tuple[str, ...] = (
@@ -38,7 +38,7 @@ def validate_header(header) -> None:
     actual: List[str] = list(header)
     expected: List[str] = list(EXPECTED_HEADER)
     if actual != expected:
-        raise SchemaError(
+        raise SchemaException(
             "Unexpected CSV header.\n  expected: {0}\n  actual:   {1}".format(
                 expected, actual
             )

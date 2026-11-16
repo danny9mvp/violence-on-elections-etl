@@ -12,8 +12,8 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import URL, Engine, make_url
 from sqlalchemy.orm import Session, sessionmaker
 
-from violence_etl.settings import Settings, get_settings
-from violence_etl.settings import database_url_object as _database_url_object
+from violence_etl.config.settings import Settings, get_settings
+from violence_etl.config.settings import database_url_object as _database_url_object
 
 
 def make_engine(

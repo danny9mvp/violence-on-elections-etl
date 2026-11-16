@@ -15,13 +15,11 @@ import pandas as pd
 from sqlalchemy import delete, select
 from sqlalchemy.engine import Engine
 
-from violence_etl.models import (
-    GoldCrimesByCalendar,
-    GoldCrimesByDepartment,
-    GoldCrimesByElectoralPeriod,
-    GoldTop5Departments,
-    SilverCrimes,
-)
+import violence_etl.db.models.gold_crimes_by_calendar
+from violence_etl.db.models.gold_crimes_by_department import GoldCrimesByDepartment
+from violence_etl.db.models.gold_crimes_by_electoral_period import GoldCrimesByElectoralPeriod
+from violence_etl.db.models.gold_top_50_departments import GoldTop5Departments
+from violence_etl.db.models.silver_crimes import SilverCrimes
 
 logger = logging.getLogger(__name__)
 
@@ -123,14 +121,14 @@ def build_gold(
     with engine.begin() as conn:
         conn.execute(delete(GoldTop5Departments))
         conn.execute(delete(GoldCrimesByDepartment))
-        conn.execute(delete(GoldCrimesByCalendar))
+        conn.execute(delete(violence_etl.db.models.gold_crimes_by_calendar.GoldCrimesByCalendar))
         conn.execute(delete(GoldCrimesByElectoralPeriod))
         if top5_records:
             conn.execute(GoldTop5Departments.__table__.insert(), top5_records)
         if dept_records:
             conn.execute(GoldCrimesByDepartment.__table__.insert(), dept_records)
         if cal_records:
-            conn.execute(GoldCrimesByCalendar.__table__.insert(), cal_records)
+            conn.execute(violence_etl.db.models.gold_crimes_by_calendar.GoldCrimesByCalendar.__table__.insert(), cal_records)
         if period_records:
             conn.execute(
                 GoldCrimesByElectoralPeriod.__table__.insert(), period_records

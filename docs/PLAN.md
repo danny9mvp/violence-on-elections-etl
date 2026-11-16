@@ -164,17 +164,17 @@ Where things live:
 - Curated table: `silver_crimes`.
 - Rejected rows: `silver_rejected_rows`.
 - Denormalized query objects: `gold_*` tables.
-- Code: `violence_etl/`.
+- Code: `../src/violence_etl`.
 - Migrations: `migrations/`.
 - Tests: `tests/`.
 - Notebooks: `notebooks/`.
-- Config: `violence_etl/settings.py` plus `.env`.
+- Config: `../src/violence_etl` plus `.env`.
 
-One codebase, two databases: use table-name prefixes (`bronze_`, `silver_`, `gold_`) rather than PostgreSQL schemas, because SQLite has no schemas. This keeps a single set of SQLAlchemy models and one Alembic history working identically on SQLite (staging/tests) and PostgreSQL (warehouse).
+One codebase, two databases: use table-name prefixes (`bronze_`, `silver_`, `gold_crimes_by_electoral_period.py`) rather than PostgreSQL schemas, because SQLite has no schemas. This keeps a single set of SQLAlchemy models and one Alembic history working identically on SQLite (staging/tests) and PostgreSQL (warehouse).
 
 ## Settings module (single env-driven config)
 
-`violence_etl/settings.py` exposes a frozen `Settings` dataclass, a
+`../src/violence_etl` exposes a frozen `Settings` dataclass, a
 `get_settings()` factory and three URL helpers. The full variable table with
 defaults is in `README.md`; this section records the design intent.
 
@@ -254,7 +254,7 @@ Artifacts:
    updated in place on every attempt (`loaded` or `skipped`), so repeated runs
    are idempotent. See README "Idempotency and reload semantics".
 
-## Table definitions (SQLAlchemy classic column style, `violence_etl/models.py`)
+## Table definitions (SQLAlchemy classic column style, `../src/violence_etl`)
 
 ```python
 Base = declarative_base()
@@ -292,13 +292,13 @@ class BronzeIngestionLog(Base):
 
 `String(64)`, `String(255)`, `Text` are used (not `String` without length) so the schema renders identically on SQLite and PostgreSQL.
 
-## Bronze ingestion behavior (`violence_etl/bronze.py`)
+## Bronze ingestion behavior (`../src/violence_etl`)
 
 Function `ingest_bronze(engine, settings, csv_path=None) -> dict`:
 
 1. If `csv_path` is None, download `settings.source_url` with `requests.get(..., allow_redirects=True, stream=True, timeout=120)` into memory, compute sha256, write landing file if absent, and write the run-stamped raw copy.
 2. Read the CSV with `pandas.read_csv(path, dtype=str, keep_default_na=False, quoting=csv.QUOTE_ALL)` so all fields stay text and empty strings stay empty strings (no NaN coercion).
-3. Assert the header equals the 7 expected names in order from `violence_etl/schema.py`; raise `SchemaError` on mismatch (fail fast, no partial load).
+3. Assert the header equals the 7 expected names in order from `../src/violence_etl`; raise `SchemaError` on mismatch (fail fast, no partial load).
 4. Idempotency: if `bronze_crimes_raw` already holds rows for this `source_sha256` and `--force` is not set, update the log row for that hash to `status="skipped"` and return `{"status": "skipped", ...}` without inserting raw rows.
 5. Otherwise delete any existing `bronze_crimes_raw` rows for this `source_sha256`, then bulk insert with the metadata columns. `load_ts` is `datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)` (naive UTC, works on 3.8 and 3.14).
 6. Upsert the `bronze_ingestion_log` row for this hash (`UNIQUE(source_sha256)`) with `status="loaded"` and the row count, in one transaction.
@@ -325,7 +325,7 @@ R9. Deduplication. Chosen rule, deliberate: drop exact duplicate business rows, 
     The default `drop` treats repeated identical rows as ingestion duplication, not distinct events, because there is no event id in the source and `CANTIDAD` is always 1.
 R10. Every rejected row is copied (raw values plus a `reject_reason`) to `silver_rejected_rows` in the same transaction, so nothing is silently lost.
 R11. Calendar derivation from `fecha_hecho`: `year`, `month` (1-12), `quarter` (1-4 from `(month-1)//3+1`), `weekday_num` (ISO 1=Monday .. 7=Sunday via `dt.weekday()+1`), `weekday_name` (`Monday`..`Sunday`).
-R12. Electoral period assignment via `violence_etl/periods.py` (next section).
+R12. Electoral period assignment via `../src/violence_etl` (next section).
 R13. Add `row_hash` = sha256 hex of the dedup key fields, for audit and idempotency, plus `silver_loaded_at`.
 
 ## Silver table definition
@@ -368,7 +368,7 @@ class SilverRejectedRows(Base):
 
 `String(100)` / `String(150)` cover the observed maxima (18 and 27 chars) with headroom.
 
-## Silver load behavior (`violence_etl/silver.py`)
+## Silver load behavior (`../src/violence_etl`)
 
 Function `build_silver(engine, settings, sha=None, force=False) -> dict`:
 
@@ -396,7 +396,7 @@ Reference cycle from the brief, which the rule must reproduce exactly: `pre-elec
 
 Colombian general elections (presidencia and congreso) are every 4 years: 2002, 2006, 2010, 2014, 2018, 2022, 2026.
 
-`violence_etl/periods.py`:
+`../src/violence_etl`:
 
 ```python
 from __future__ import annotations
@@ -445,7 +445,7 @@ whole data range with no unmapped year.
 
 Goal: small denormalized tables ready for direct SQL or BI queries. Built by full refresh (truncate and rewrite) from `silver_crimes`, which keeps them deterministic and idempotent. Tables, not views, so the same objects work on SQLite and PostgreSQL.
 
-The four tables and their columns are catalogued in `README.md`; the models live in `violence_etl/models.py`.
+The four tables and their columns are catalogued in `README.md`; the models live in `../src/violence_etl`.
 
 Object mapping to the requirement:
 - a. top 5 departments by total crimes -> `gold_top5_departments` (`rank` 1..5, ordered by `total_crimes DESC`, tie-break `departamento ASC`).
@@ -453,7 +453,7 @@ Object mapping to the requirement:
 - c. total crimes by year, month, weekday and quarter -> `gold_crimes_by_calendar` (grain: year x quarter x month x weekday).
 - d. total crimes by electoral period -> `gold_crimes_by_electoral_period` (`period_order` uses post, intermediate, pre, electoral for stable presentation or calendar order, documented in README; `pct_of_total` is share of the grand total, rounded to 2 decimals).
 
-`violence_etl/gold.py` exposes `build_gold(engine) -> dict`, which for each table: `DELETE` existing rows, run the aggregation with `pandas.groupby` or an `INSERT ... SELECT`, commit, and return row counts plus the grand total. Also optionally writes `data/gold/*.csv` exports controlled by a flag.
+`../src/violence_etl` exposes `build_gold(engine) -> dict`, which for each table: `DELETE` existing rows, run the aggregation with `pandas.groupby` or an `INSERT ... SELECT`, commit, and return row counts plus the grand total. Also optionally writes `data/gold/*.csv` exports controlled by a flag.
 
 Optional convenience: Alembic creates the four `gold_*` tables; the pipeline fills them. No gold views are required, but `README.md` documents the equivalent `SELECT` for each.
 
@@ -470,11 +470,12 @@ alembic init -t generic migrations
 `migrations/env.py` key points:
 
 ```python
-from violence_etl.settings import get_settings, database_url
-from violence_etl.models import Base
+from violence_etl.config.settings import get_settings, database_url
+from violence_etl import Base
 
 config.set_main_option("sqlalchemy.url", database_url(get_settings()))
 target_metadata = Base.metadata
+
 
 def run_migrations_online():
     connectable = engine_from_config(
@@ -486,7 +487,7 @@ def run_migrations_online():
         context.configure(
             connection=connection,
             target_metadata=target_metadata,
-            render_as_batch=True,   # SQLite ALTER support
+            render_as_batch=True,  # SQLite ALTER support
         )
         with context.begin_transaction():
             context.run_migrations()
@@ -514,13 +515,13 @@ Each migration has a working `downgrade`.
 
 ## CLI
 
-`violence_etl/cli.py` uses `argparse` (stdlib, identical on 3.8/3.14). Entry point: `python -m violence_etl.cli <command>`.
+`../src/violence_etl` uses `argparse` (stdlib, identical on 3.8/3.14). Entry point: `python -m violence_etl.cli <command>`.
 
 The command list, the per-command flags and the `Makefile` aliases are in `README.md`. Design note: the global flags (`--backend`, `--sqlite-path`, `--log-level`) are pushed into the environment before `get_settings()` is called, so the rest of the code path is unchanged.
 
 ## Logging
 
-`violence_etl/logging_conf.py`:
+`../src/violence_etl`:
 
 ```python
 def configure_logging(level: str = "INFO") -> None:
@@ -539,7 +540,7 @@ Every layer logs: start, input row count, output row count, dropped/rejected cou
 - Gold: full refresh (`DELETE` then aggregate-insert) inside one transaction. Always converges to the same content.
 - Pipeline is safe to run repeatedly end to end; a second `run-all` on the same source changes nothing and logs `skipped` at bronze.
 - Error handling: `SchemaError` on header mismatch (fail fast, no writes). Row-level problems never abort the load; they route to `silver_rejected_rows` with a reason. DB errors roll back the transaction for that layer and surface with a non-zero exit code from the CLI.
-- Typed exceptions in `violence_etl/errors.py`: `EtlError`, `SchemaError`, `DownloadError`, `LoadError`.
+- Typed exceptions in `../src/violence_etl`: `EtlError`, `SchemaError`, `DownloadError`, `LoadError`.
 
 ## Test plan
 
@@ -647,14 +648,14 @@ Never commit or push to `main`.
 
 1. `chore: initialize repository`: `git init`, create branch `feat/etl-pipeline`, add `.gitignore`, `.env.example`, `README.md` skeleton, `docs/PLAN.md`.
 2. `chore(deps): pin runtime and dev requirements`: add `requirements.txt`, `requirements-dev.txt`, `pyproject.toml` (pytest config), `Makefile`.
-3. `feat(config): add env-driven settings and logging`: `violence_etl/__init__.py`, `settings.py`, `logging_conf.py`, `errors.py`, `tests/test_settings.py`.
-4. `feat(db): add sqlalchemy models and engine factory`: `violence_etl/db.py`, `models.py`, `schema.py`.
+3. `feat(config): add env-driven settings and logging`: `../src/violence_etl`, `settings.py`, `logging_conf.py`, `errors.py`, `tests/test_settings.py`.
+4. `feat(db): add sqlalchemy models and engine factory`: `../src/violence_etl`, `models.py`, `schema.py`.
 5. `feat(migrations): add alembic setup and bronze migration`: `alembic.ini`, `migrations/env.py`, `migrations/script.py.mako`, `migrations/versions/0001_bronze.py`.
-6. `feat(bronze): download and land raw csv`: `violence_etl/io.py`, `bronze.py`, `tests/fixtures/*.csv`, `tests/test_bronze.py`.
-7. `feat(silver): add period mapper`: `violence_etl/periods.py`, `tests/test_periods.py`.
-8. `feat(silver): curate, dedup and validate`: `migrations/versions/0002_silver.py`, `violence_etl/silver.py`, `tests/test_silver.py`.
-9. `feat(gold): add denormalized query tables`: `migrations/versions/0003_gold.py`, `violence_etl/gold.py`, `tests/test_gold.py`.
-10. `feat(cli): orchestrate the full pipeline`: `violence_etl/pipeline.py`, `cli.py`, `tests/test_pipeline_sqlite.py`.
+6. `feat(bronze): download and land raw csv`: `../src/violence_etl`, `bronze.py`, `tests/fixtures/*.csv`, `tests/test_bronze.py`.
+7. `feat(silver): add period mapper`: `../src/violence_etl`, `tests/test_periods.py`.
+8. `feat(silver): curate, dedup and validate`: `migrations/versions/0002_silver.py`, `../src/violence_etl`, `tests/test_silver.py`.
+9. `feat(gold): add denormalized query tables`: `migrations/versions/0003_gold.py`, `../src/violence_etl`, `tests/test_gold.py`.
+10. `feat(cli): orchestrate the full pipeline`: `../src/violence_etl`, `cli.py`, `tests/test_pipeline_sqlite.py`.
 11. `docs: add analysis notebooks and usage guide`: `notebooks/01_bronze_profiling.ipynb`, `02_silver_validation.ipynb`, `03_gold_analysis.ipynb`, finalize `README.md` with the period table and gold SQL.
 
 Run `make lint` (ruff, configured in `pyproject.toml`) and `python -m pytest tests -q` before each commit; both interpreters if available.

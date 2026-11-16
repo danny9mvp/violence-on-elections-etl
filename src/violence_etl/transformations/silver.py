@@ -19,12 +19,13 @@ import pandas as pd
 from sqlalchemy import delete, func, select
 from sqlalchemy.engine import Engine
 
-from violence_etl.bronze import latest_loaded_sha, read_bronze_frame
-from violence_etl.errors import LoadError
-from violence_etl.models import SilverCrimes, SilverRejectedRows
-from violence_etl.periods import electoral_period
-from violence_etl.settings import Settings
-from violence_etl.timeutil import naive_utc_now
+from violence_etl.transformations.bronze import latest_loaded_sha, read_bronze_frame
+from violence_etl.exceptions.load_exception import LoadException
+from violence_etl.db.models.silver_crimes import SilverCrimes
+from violence_etl.db.models.silver_rejected_rows import SilverRejectedRows
+from violence_etl.utils.periods import electoral_period
+from violence_etl.config.settings import Settings
+from violence_etl.utils.timeutil import naive_utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +93,7 @@ def _clean(frame: pd.DataFrame) -> pd.DataFrame:
 
     # R3: codes must be numeric and fit the fixed widths; pad with zeros.
     # Empty cells are left for R7 so they are reported as null_field, matching
-    # the type rules: only non-empty invalid values are code errors.
+    # the type rules: only non-empty invalid values are code exceptions.
     depto_empty = _is_empty(df["cod_depto"])
     depto_valid = df["cod_depto"].str.fullmatch(r"\d{1,2}").fillna(False)
     open_mask = _assign_reason(
@@ -258,7 +259,7 @@ def build_silver(
     started = time.time()
     sha = sha or latest_loaded_sha(engine)
     if not sha:
-        raise LoadError("No bronze data found. Run ingest-bronze first.")
+        raise LoadException("No bronze data found. Run ingest-bronze first.")
 
     raw = read_bronze_frame(engine, sha)
     raw_rows = int(len(raw))

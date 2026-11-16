@@ -9,22 +9,20 @@ from typing import List, Optional
 
 from sqlalchemy import func, select, text
 
-from violence_etl import io as etl_io
-from violence_etl.db import make_engine
-from violence_etl.errors import EtlError
-from violence_etl.logging_conf import configure_logging
-from violence_etl.models import (
-    Base,
-    BronzeCrimesRaw,
-    GoldCrimesByCalendar,
-    GoldCrimesByDepartment,
-    GoldCrimesByElectoralPeriod,
-    GoldTop5Departments,
-    SilverCrimes,
-    SilverRejectedRows,
-)
+from violence_etl.db.models.gold_crimes_by_calendar import GoldCrimesByCalendar
+from violence_etl.db.models.gold_crimes_by_department import GoldCrimesByDepartment
+from violence_etl.db.models.gold_crimes_by_electoral_period import GoldCrimesByElectoralPeriod
+from violence_etl.db.models.gold_top_50_departments import GoldTop5Departments
+from violence_etl.db.models.silver_crimes import SilverCrimes
+from violence_etl.db.models.silver_rejected_rows import SilverRejectedRows
+from violence_etl.utils import io as etl_io
+from violence_etl.db.connection import make_engine
+from violence_etl.exceptions.etl_exception import EtlException
+from violence_etl.config.logging_conf import configure_logging
+from violence_etl.db.models.base_model import Base
+from violence_etl.db.models.bronze_crimes_raw import BronzeCrimesRaw
 from violence_etl.pipeline import run_all, run_bronze, run_gold, run_silver
-from violence_etl.settings import (
+from violence_etl.config.settings import (
     Settings,
     database_url_display,
     database_url_object,
@@ -33,7 +31,7 @@ from violence_etl.settings import (
 
 logger = logging.getLogger("violence_etl.cli")
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def _apply_global_overrides(args: argparse.Namespace) -> None:
@@ -290,7 +288,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     }
     try:
         return dispatch[args.command](settings, args)
-    except EtlError as exc:
+    except EtlException as exc:
         logger.error("pipeline error: %s", exc, exc_info=True)
         print("error: {0}".format(exc), file=sys.stderr)
         return 1

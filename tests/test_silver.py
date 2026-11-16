@@ -4,9 +4,10 @@ import dataclasses
 
 from sqlalchemy import func, select
 
-from violence_etl.bronze import ingest_bronze
-from violence_etl.models import SilverCrimes, SilverRejectedRows
-from violence_etl.silver import build_silver
+from violence_etl.transformations.bronze import ingest_bronze
+from violence_etl.db.models.silver_crimes import SilverCrimes
+from violence_etl.db.models.silver_rejected_rows import SilverRejectedRows
+from violence_etl.transformations.silver import build_silver
 
 HEADER = '"FECHA HECHO","COD_DEPTO","DEPARTAMENTO","COD_MUNI","MUNICIPIO","ZONA","CANTIDAD"\n'
 

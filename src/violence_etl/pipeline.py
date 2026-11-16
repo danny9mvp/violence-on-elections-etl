@@ -6,10 +6,10 @@ from typing import Dict, Optional
 
 from sqlalchemy.engine import Engine
 
-from violence_etl.bronze import ingest_bronze
-from violence_etl.gold import build_gold
-from violence_etl.settings import Settings
-from violence_etl.silver import build_silver
+from violence_etl.transformations.bronze import ingest_bronze
+from violence_etl.transformations.gold import build_gold
+from violence_etl.config.settings import Settings
+from violence_etl.transformations.silver import build_silver
 
 logger = logging.getLogger(__name__)
 

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from violence_etl.errors import SchemaError
-from violence_etl.schema import COLUMN_MAP, EXPECTED_HEADER, validate_header
+from violence_etl.exceptions.schema_exception import SchemaException
+from violence_etl.utils.schema import COLUMN_MAP, EXPECTED_HEADER, validate_header
 
 
 def test_expected_header_exact():
@@ -30,15 +30,15 @@ def test_validate_header_accepts_exact_order():
 def test_validate_header_rejects_wrong_order():
     swapped = list(EXPECTED_HEADER)
     swapped[0], swapped[1] = swapped[1], swapped[0]
-    with pytest.raises(SchemaError):
+    with pytest.raises(SchemaException):
         validate_header(swapped)
 
 
 def test_validate_header_rejects_extra_column():
-    with pytest.raises(SchemaError):
+    with pytest.raises(SchemaException):
         validate_header(list(EXPECTED_HEADER) + ["EXTRA"])
 
 
 def test_validate_header_rejects_lowercase():
-    with pytest.raises(SchemaError):
+    with pytest.raises(SchemaException):
         validate_header([c.lower() for c in EXPECTED_HEADER])

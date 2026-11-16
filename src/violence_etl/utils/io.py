@@ -11,7 +11,7 @@ from typing import Optional, Tuple
 import pandas as pd
 import requests
 
-from violence_etl.errors import DownloadError
+from violence_etl.exceptions.download_exception import DownloadException
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +46,7 @@ def download_source(url: str, timeout: int = 120) -> bytes:
                 chunks.append(chunk)
         return b"".join(chunks)
     except requests.RequestException as exc:  # pragma: no cover - network path
-        raise DownloadError("Could not download {0}: {1}".format(url, exc)) from exc
+        raise DownloadException("Could not download {0}: {1}".format(url, exc)) from exc
 
 
 def landing_path(bronze_dir: str, sha: str) -> str:

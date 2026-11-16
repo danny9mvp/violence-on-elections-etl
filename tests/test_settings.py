@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from violence_etl.settings import (
+from violence_etl.config.settings import (
     DEFAULT_SOURCE_URL,
     DEFAULT_SQLITE_PATH,
     database_url,

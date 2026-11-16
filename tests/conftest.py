@@ -9,8 +9,8 @@ import os
 
 import pytest
 
-from violence_etl.db import make_engine
-from violence_etl.models import Base
+from violence_etl.db.connection import make_engine
+from violence_etl.db.models.base_model import Base
 
 _ETL_ENV_KEYS = (
     "ETL_DB_BACKEND",
@@ -49,7 +49,7 @@ def sqlite_engine(tmp_path):
 @pytest.fixture
 def settings_sqlite(sqlite_engine, monkeypatch, tmp_path):
     """Settings pointed at the temp SQLite database and a temp bronze dir."""
-    from violence_etl.settings import get_settings
+    from violence_etl.config.settings import get_settings
 
     monkeypatch.setenv("ETL_DB_BACKEND", "sqlite")
     monkeypatch.setenv("ETL_SQLITE_PATH", str(tmp_path / "test.db"))

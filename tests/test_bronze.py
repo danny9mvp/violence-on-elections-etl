@@ -5,11 +5,12 @@ import os
 import pytest
 from sqlalchemy import func, select
 
-from violence_etl.bronze import ingest_bronze
-from violence_etl.errors import SchemaError
-from violence_etl.io import read_csv, sha256_file
-from violence_etl.models import BronzeCrimesRaw, BronzeIngestionLog
-from violence_etl.schema import EXPECTED_HEADER, validate_header
+from violence_etl.transformations.bronze import ingest_bronze
+from violence_etl.exceptions.schema_exception import SchemaException
+from violence_etl.utils.io import read_csv, sha256_file
+from violence_etl.db.models.bronze_crimes_raw import BronzeCrimesRaw
+from violence_etl.db.models.bronze_ingestion_log import BronzeIngestionLog
+from violence_etl.utils.schema import EXPECTED_HEADER, validate_header
 
 
 def _count(engine, model):
@@ -116,14 +117,14 @@ def test_header_validation_ok():
 
 
 def test_header_validation_raises_on_mismatch():
-    with pytest.raises(SchemaError):
+    with pytest.raises(SchemaException):
         validate_header(["FECHA HECHO", "COD_DEPTO"])
 
 
 def test_header_validation_raises_on_case_change():
     bad = list(EXPECTED_HEADER)
     bad[0] = "fecha hecho"
-    with pytest.raises(SchemaError):
+    with pytest.raises(SchemaException):
         validate_header(bad)
 
 
@@ -137,5 +138,5 @@ def test_read_csv_preserves_empty_string(bad_csv):
 def test_ingest_wrong_header_raises(sqlite_engine, settings_sqlite, tmp_path):
     bad = tmp_path / "wrong.csv"
     bad.write_text('"A","B"\n"1","2"\n')
-    with pytest.raises(SchemaError):
+    with pytest.raises(SchemaException):
         ingest_bronze(sqlite_engine, settings_sqlite, csv_path=str(bad))

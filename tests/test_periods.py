@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from violence_etl.periods import (
+from violence_etl.utils.periods import (
     ELECTION_YEARS,
     UNCLASSIFIED,
     electoral_period,
