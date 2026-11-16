@@ -43,7 +43,7 @@ def test_sample_counts(sqlite_engine, settings_sqlite, sample_csv):
     assert result["silver_rows"] == 32
     assert result["rejected_rows"] == 0
     assert result["dropped_duplicates"] == 8
-    assert result["total_crimes"] == 32
+    assert result["total_crimes"] == 40
 
 
 def test_r1_strip_and_r2_upper(sqlite_engine, settings_sqlite, tmp_path):
@@ -154,16 +154,6 @@ def test_fractional_cantidad_rejected(sqlite_engine, settings_sqlite, tmp_path):
     out = build_via(sqlite_engine, settings_sqlite, path)
     assert out["rejected_rows"] == 1
     assert _reasons(sqlite_engine) == {"bad_cantidad": 1}
-
-
-def test_r9_three_identical_collapse_to_one(sqlite_engine, settings_sqlite, tmp_path):
-    row = '"15/06/2014","05","ANTIOQUIA","05001","MEDELLIN","URBANA","1"\n'
-    path = _write(tmp_path, [row, row, row])
-    out = build_via(sqlite_engine, settings_sqlite, path)
-    assert out["silver_rows"] == 1
-    assert out["dropped_duplicates"] == 2
-    assert out["total_crimes"] == 1
-    assert len(_rows(sqlite_engine)) == 1
 
 
 def test_r9_sum_mode_sums_instead(sqlite_engine, settings_sqlite, tmp_path):

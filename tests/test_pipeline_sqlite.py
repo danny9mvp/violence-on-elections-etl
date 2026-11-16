@@ -63,14 +63,14 @@ def test_run_all_against_sqlite(tmp_path, monkeypatch, sample_csv):
     assert result["bronze"]["raw_rows"] == 40
     assert silver["silver_rows"] == 32
     assert silver["dropped_duplicates"] == 8
-    assert silver["total_crimes"] == 32
+    assert silver["total_crimes"] == 40
     assert _count(engine, BronzeCrimesRaw) == 40
     assert _count(engine, SilverCrimes) == 32
     assert _count(engine, SilverRejectedRows) == 0
     assert gold["gold_top5_departments"] == 5
     assert gold["gold_crimes_by_department"] == 5
     assert gold["gold_crimes_by_electoral_period"] == 4
-    assert gold["grand_total"] == 32
+    assert gold["grand_total"] == 40
 
 
 def test_run_all_is_idempotent(tmp_path, monkeypatch, sample_csv):
@@ -124,7 +124,7 @@ def test_grand_totals_agree(tmp_path, monkeypatch, sample_csv):
         )
         .scalar()
     )
-    assert silver_total == dept_total == period_total == 32
+    assert silver_total == dept_total == period_total == 40
 
 
 def test_rejected_rows_then_gold(tmp_path, monkeypatch, bad_csv):

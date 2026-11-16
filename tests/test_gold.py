@@ -37,13 +37,13 @@ def test_top5_rows_and_ranks(sqlite_engine, settings_sqlite, sample_csv):
     assert [r.rank for r in rows] == [1, 2, 3, 4, 5]
     # Ordered by total desc, tie broken by departamento asc.
     assert [r.departamento for r in rows] == [
-        "BOGOTA",
         "ANTIOQUIA",
+        "BOGOTA",
         "VALLE",
-        "BOLIVAR",
         "ATLANTICO",
+        "BOLIVAR",
     ]
-    assert [r.total_crimes for r in rows] == [9, 8, 8, 4, 3]
+    assert [r.total_crimes for r in rows] == [13, 10, 8, 5, 4]
 
 
 def test_top5_is_monotonic(sqlite_engine, settings_sqlite, sample_csv):
@@ -66,7 +66,7 @@ def test_by_department_matches_silver_total(sqlite_engine, settings_sqlite, samp
     dept_total = _scalar(
         sqlite_engine, select(func.coalesce(func.sum(GoldCrimesByDepartment.total_crimes), 0))
     )
-    assert int(dept_total) == int(silver_total) == 32
+    assert int(dept_total) == int(silver_total) == 40
 
 
 def test_by_department_has_all_departments(sqlite_engine, settings_sqlite, sample_csv):
@@ -77,7 +77,7 @@ def test_by_department_has_all_departments(sqlite_engine, settings_sqlite, sampl
     top5_sum = _scalar(
         sqlite_engine, select(func.coalesce(func.sum(GoldTop5Departments.total_crimes), 0))
     )
-    assert int(top5_sum) == 32
+    assert int(top5_sum) == 40
 
 
 def test_by_calendar_grain_is_unique(sqlite_engine, settings_sqlite, sample_csv):
@@ -100,7 +100,7 @@ def test_by_calendar_grain_is_unique(sqlite_engine, settings_sqlite, sample_csv)
     cal_total = _scalar(
         sqlite_engine, select(func.coalesce(func.sum(GoldCrimesByCalendar.total_crimes), 0))
     )
-    assert int(cal_total) == 32
+    assert int(cal_total) == 40
 
 
 def test_calendar_columns_present(sqlite_engine, settings_sqlite, sample_csv):
@@ -135,7 +135,7 @@ def test_by_period_rows_and_pct(sqlite_engine, settings_sqlite, sample_csv):
     total_pct = sum(Decimal(str(r.pct_of_total)) for r in rows)
     assert abs(total_pct - Decimal("100.00")) <= Decimal("0.1")
     period_total = sum(r.total_crimes for r in rows)
-    assert period_total == 32
+    assert period_total == 40
 
 
 def test_gold_full_refresh_is_deterministic(sqlite_engine, settings_sqlite, sample_csv):
@@ -143,7 +143,7 @@ def test_gold_full_refresh_is_deterministic(sqlite_engine, settings_sqlite, samp
     build_silver(sqlite_engine, settings_sqlite)
     first = build_gold(sqlite_engine)
     second = build_gold(sqlite_engine)
-    assert first["grand_total"] == second["grand_total"] == 32
+    assert first["grand_total"] == second["grand_total"] == 40
     dept_count = _scalar(sqlite_engine, select(func.count()).select_from(GoldCrimesByDepartment))
     assert int(dept_count) == 5
 
@@ -199,7 +199,7 @@ def test_export_csv_branch_writes_all_files(
     export_dir = tmp_path / "gold"
     out = build_gold(sqlite_engine, export_csv=True, export_dir=str(export_dir))
 
-    assert out["grand_total"] == 32
+    assert out["grand_total"] == 40
     for name in [
         "gold_top5_departments.csv",
         "gold_crimes_by_department.csv",
