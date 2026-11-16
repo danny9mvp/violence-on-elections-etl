@@ -45,3 +45,4 @@ data/gold/*
 
 # Notebook prototyping
 notebooks/
+notebooks/*.ipynb
