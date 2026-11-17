@@ -21,8 +21,8 @@ does not leak into the production environment. `README.md` has the same steps.
 
 ## Notes
 
-- Every notebook starts with a bootstrap cell that inserts the repository root
-  on `sys.path` and sets `ETL_DB_BACKEND=sqlite`, so notebooks never touch
+- Every notebook starts with a bootstrap cell that adds the project to
+  `sys.path` and sets `ETL_DB_BACKEND=sqlite`, so notebooks never touch
   PostgreSQL by accident.
 - Notebook 01 downloads the source dataset, so it needs network access.
 - Notebooks 02 and 03 need the SQLite database under `data/warehouse/` and the

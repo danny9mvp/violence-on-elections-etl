@@ -19,15 +19,16 @@ python -m venv .venv
 .venv/bin/python -m pip install --upgrade pip
 .venv/bin/python -m pip install -r requirements-dev.txt
 
-.venv/bin/python -m violence_etl.cli --backend sqlite init-db
-.venv/bin/python -m violence_etl.cli --backend sqlite run-all
-.venv/bin/python -m violence_etl.cli --backend sqlite validate
+PYTHONPATH=src .venv/bin/python -m violence_etl.cli --backend sqlite init-db
+PYTHONPATH=src .venv/bin/python -m violence_etl.cli --backend sqlite run-all
+PYTHONPATH=src .venv/bin/python -m violence_etl.cli --backend sqlite validate
 ```
 
-The `--backend sqlite` flag keeps the quickstart self-contained, so it needs no
-PostgreSQL server. Without it, the commands target PostgreSQL. The first
-`run-all` downloads the source and needs network access. Expected tail of the
-first run:
+The package lives under `src/` (no editable install step is configured), so run
+CLI commands from the repository root with `PYTHONPATH=src`. The `--backend sqlite`
+flag keeps the quickstart self-contained, so it needs no PostgreSQL server.
+Without it, the commands target PostgreSQL. The first `run-all` downloads the
+source and needs network access. Expected tail of the first run:
 
 ```
 run-all: bronze_status=loaded raw_rows=15696 silver_rows=14212 rejected=0 dropped_duplicates=1484 total_crimes=14212 gold_grand_total=14212
@@ -151,6 +152,7 @@ createdb -U postgres violence
 
 export ETL_DB_BACKEND=postgres
 export PGHOST=localhost PGPORT=5432 PGUSER=postgres PGPASSWORD=postgres PGDATABASE=violence
+export PYTHONPATH=src
 
 python -m violence_etl.cli init-db
 python -m violence_etl.cli run-all
@@ -161,19 +163,22 @@ python -m violence_etl.cli validate
 repository root with the same environment, is:
 
 ```
-alembic upgrade head
+PYTHONPATH=src alembic upgrade head
 ```
 
-`migrations/env.py` reads `violence_etl.settings`, so the same migration history
-runs on both engines. The history has four revisions: `0001_bronze`,
+`migrations/env.py` reads `violence_etl` settings, so the same migration history
+runs on both engines. The CLI resolves `alembic.ini` and `migrations/` from the
+repository root via `REPO_ROOT` (defined in `src/violence_etl/cli.py` and in the
+package `__init__` modules). The history has four revisions: `0001_bronze`,
 `0002_silver`, `0003_gold` and `0004_bronze_ingestion_unique`, which adds
 `UNIQUE(source_sha256)` to `bronze_ingestion_log`. Useful Alembic commands:
 `alembic current`, `alembic history`, `alembic downgrade base`.
 
 ## CLI reference
 
-Entry point: `python -m violence_etl.cli <command>`. Global flags go before the
-command:
+Entry point (from the repository root, with the package on the path):
+`PYTHONPATH=src python -m violence_etl.cli <command>`. Global flags go before
+the command:
 
 - `--backend postgres|sqlite`: sets `ETL_DB_BACKEND` for this run.
 - `--sqlite-path PATH`: sets `ETL_SQLITE_PATH` for this run.
@@ -433,8 +438,19 @@ for the notebook list and prerequisites.
 - `make sqlite-run`: `init-db` then `run-all` against
   `data/warehouse/violence_staging.db` with `--backend sqlite`.
 
+The CLI targets invoke `python -m violence_etl.cli` directly. With the current
+`src/` layout (no editable install), run them with `PYTHONPATH=src` in the
+environment, for example `PYTHONPATH=src make sqlite-run`, or use the explicit
+CLI commands shown above.
+
 ## Troubleshooting
 
+- `ModuleNotFoundError: No module named 'violence_etl'`: the package is under
+  `src/`. Run commands from the repository root with `PYTHONPATH=src` (for
+  example, `PYTHONPATH=src python -m violence_etl.cli ...`), or install the
+  project in editable mode once packaging is configured. Do not run
+  `python -m src.violence_etl.cli`, because internal imports use the
+  `violence_etl.*` package name.
 - `init-db` cannot connect to PostgreSQL: check `PGHOST`, `PGPORT`, `PGUSER`,
   `PGPASSWORD`, `PGDATABASE` or `DATABASE_URL`, and make sure the database
   exists and the server is running.
@@ -447,8 +463,10 @@ for the notebook list and prerequisites.
 - `SchemaError` on ingest: the CSV header must match
   `FECHA HECHO,COD_DEPTO,DEPARTAMENTO,COD_MUNI,MUNICIPIO,ZONA,CANTIDAD` exactly,
   in order and case.
-- A notebook cannot import `violence_etl`: run the bootstrap cell first, which
-  adds the repository root to `sys.path` and forces SQLite.
+- A notebook cannot import `violence_etl`: run the bootstrap cell first, ensure
+  the kernel is using the project `.venv`, and confirm the notebook can resolve
+  the `violence_etl` package in your environment. If imports still fail, check
+  that ORM models import `Base` from `violence_etl.db.models.base_model`.
 
 ## Known limitations
 
