@@ -9,25 +9,25 @@ from typing import List, Optional
 
 from sqlalchemy import func, select, text
 
-from violence_etl.db.models.gold_crimes_by_calendar import GoldCrimesByCalendar
-from violence_etl.db.models.gold_crimes_by_department import GoldCrimesByDepartment
-from violence_etl.db.models.gold_crimes_by_electoral_period import GoldCrimesByElectoralPeriod
-from violence_etl.db.models.gold_top_50_departments import GoldTop5Departments
-from violence_etl.db.models.silver_crimes import SilverCrimes
-from violence_etl.db.models.silver_rejected_rows import SilverRejectedRows
-from violence_etl.utils import io as etl_io
-from violence_etl.db.connection import make_engine
-from violence_etl.exceptions.etl_exception import EtlException
 from violence_etl.config.logging_conf import configure_logging
-from violence_etl.db.models.base_model import Base
-from violence_etl.db.models.bronze_crimes_raw import BronzeCrimesRaw
-from violence_etl.pipeline import run_all, run_bronze, run_gold, run_silver
 from violence_etl.config.settings import (
     Settings,
     database_url_display,
     database_url_object,
     get_settings,
 )
+from violence_etl.db.connection import make_engine
+from violence_etl.db.models.base_model import Base
+from violence_etl.db.models.bronze_crimes_raw import BronzeCrimesRaw
+from violence_etl.db.models.gold_crimes_by_calendar import GoldCrimesByCalendar
+from violence_etl.db.models.gold_crimes_by_department import GoldCrimesByDepartment
+from violence_etl.db.models.gold_crimes_by_electoral_period import GoldCrimesByElectoralPeriod
+from violence_etl.db.models.gold_top_50_departments import GoldTop5Departments
+from violence_etl.db.models.silver_crimes import SilverCrimes
+from violence_etl.db.models.silver_rejected_rows import SilverRejectedRows
+from violence_etl.exceptions.etl_exception import EtlException
+from violence_etl.pipeline import run_all, run_bronze, run_gold, run_silver
+from violence_etl.utils import io as etl_io
 
 logger = logging.getLogger("violence_etl.cli")
 
@@ -36,8 +36,6 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fi
 
 def _apply_global_overrides(args: argparse.Namespace) -> None:
     """Push CLI flags into the environment before get_settings() is called."""
-    if args.backend:
-        os.environ["ETL_DB_BACKEND"] = args.backend
     if args.sqlite_path:
         os.environ["ETL_SQLITE_PATH"] = args.sqlite_path
     if args.log_level:
@@ -235,7 +233,6 @@ def cmd_validate(settings: Settings, args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="violence_etl.cli")
-    parser.add_argument("--backend", choices=["postgres", "sqlite"], default=None)
     parser.add_argument("--sqlite-path", default=None)
     parser.add_argument("--log-level", default=None)
 
@@ -274,7 +271,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     _apply_global_overrides(args)
     settings = get_settings()
     configure_logging(settings.log_level)
-    logger.debug("cli: command=%s backend=%s", args.command, settings.backend)
+    logger.debug("cli: command=%s env=%s", args.command, settings.env)
 
     dispatch = {
         "init-db": cmd_init_db,

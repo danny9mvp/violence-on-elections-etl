@@ -20,5 +20,5 @@ run-all:
 	$(CLI) run-all
 
 sqlite-run:
-	$(CLI) --backend sqlite --sqlite-path data/warehouse/violence_staging.db init-db
-	$(CLI) --backend sqlite --sqlite-path data/warehouse/violence_staging.db run-all
+	ENV=DEV ETL_SQLITE_PATH=data/warehouse/violence_staging.db $(CLI) init-db
+	ENV=DEV ETL_SQLITE_PATH=data/warehouse/violence_staging.db $(CLI) run-all

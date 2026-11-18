@@ -7,10 +7,11 @@ The pipeline downloads the source CSV, keeps it verbatim in a landing area,
 mirrors it into a bronze table, curates and deduplicates it into silver, and
 builds small denormalized gold tables ready for SQL or BI queries.
 
-One codebase targets PostgreSQL (the warehouse) and SQLite (staging and tests).
-The target is selected with environment variables, so no code change is needed
-to switch. The design and rationale live in `docs/PLAN.md`; this file is the
-usage guide.
+One codebase targets SQLite for local development and automated tests
+(`ENV=DEV|TEST`) and Azure PostgreSQL for production (`ENV=PROD`). PostgreSQL
+credentials are not read from local environment variables; in production they
+are fetched from Azure Key Vault. The design and rationale live in
+`docs/PLAN.md`; this file is the usage guide.
 
 ## Quickstart (SQLite)
 
@@ -19,16 +20,16 @@ python -m venv .venv
 .venv/bin/python -m pip install --upgrade pip
 .venv/bin/python -m pip install -r requirements-dev.txt
 
-PYTHONPATH=src .venv/bin/python -m violence_etl.cli --backend sqlite init-db
-PYTHONPATH=src .venv/bin/python -m violence_etl.cli --backend sqlite run-all
-PYTHONPATH=src .venv/bin/python -m violence_etl.cli --backend sqlite validate
+PYTHONPATH=src ENV=DEV .venv/bin/python -m violence_etl.cli init-db
+PYTHONPATH=src ENV=DEV .venv/bin/python -m violence_etl.cli run-all
+PYTHONPATH=src ENV=DEV .venv/bin/python -m violence_etl.cli validate
 ```
 
-The package lives under `src/` (no editable install step is configured), so run
-CLI commands from the repository root with `PYTHONPATH=src`. The `--backend sqlite`
-flag keeps the quickstart self-contained, so it needs no PostgreSQL server.
-Without it, the commands target PostgreSQL. The first `run-all` downloads the
-source and needs network access. Expected tail of the first run:
+`ENV` defaults to `DEV`, so `ENV=DEV` can be omitted for local runs. The
+package lives under `src/` (no editable install step is configured), so run
+CLI commands from the repository root with `PYTHONPATH=src`. The first
+`run-all` downloads the source and needs network access. Expected tail of the
+first run:
 
 ```
 run-all: bronze_status=loaded raw_rows=15696 silver_rows=14212 rejected=0 dropped_duplicates=1484 total_crimes=14212 gold_grand_total=14212
@@ -63,9 +64,9 @@ because the insert rowcount is zero when every business key already exists.
 
 ## Stack and compatibility
 
-Python 3.8 through 3.14 from one source tree, PostgreSQL LTS as warehouse,
-SQLite for staging and tests, Alembic migrations, SQLAlchemy ORM, Pandas,
-PyTest and Jupyter notebooks.
+Python 3.8 through 3.14 from one source tree, Azure PostgreSQL as the
+production warehouse, SQLite for local development and tests, Alembic
+migrations, SQLAlchemy ORM, Pandas, PyTest and Jupyter notebooks.
 
 Compatibility rules used in the code: `from __future__ import annotations`,
 `typing.List`/`Optional`/`Dict`, SQLAlchemy classic `Column(...)` style, and no
@@ -87,11 +88,15 @@ pandas==2.3.3;      python_version >= "3.9"
 numpy==2.3.2;       python_version >= "3.11"
 requests==2.31.0
 python-dotenv==1.0.1
+azure-identity==1.17.1
+azure-keyvault-secrets==4.8.0
 ```
 
-`requirements-dev.txt` adds `pytest`, `ruff`, `pytest-cov`, `coverage` and the
-Jupyter stack (`jupyterlab`, `notebook`, `ipykernel`). The coverage and Jupyter
-pins are split by interpreter range with the same markers.
+`azure-identity` and `azure-keyvault-secrets` are used in `ENV=PROD` to fetch
+PostgreSQL credentials from Azure Key Vault. `requirements-dev.txt` adds
+`pytest`, `ruff`, `pytest-cov`, `coverage` and the Jupyter stack
+(`jupyterlab`, `notebook`, `ipykernel`). The coverage and Jupyter pins are
+split by interpreter range with the same markers.
 
 ## Install
 
@@ -107,57 +112,58 @@ dev and notebook tools. `make install` runs the last two commands.
 ## Configuration
 
 All settings come from environment variables (or a local `.env`, which is
-gitignored). `.env.example` lists them with the defaults.
+gitignored). `.env.example` lists them.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `ETL_DB_BACKEND` | `postgres` | `postgres` or `sqlite` |
-| `PGHOST` | `localhost` | warehouse host |
-| `PGPORT` | `5432` | warehouse port |
-| `PGUSER` | `postgres` | warehouse user |
-| `PGPASSWORD` | `postgres` | warehouse password |
-| `PGDATABASE` | `violence` | warehouse database |
-| `ETL_SQLITE_PATH` | `data/warehouse/violence_staging.db` | staging/test SQLite file |
+| `ENV` | `DEV` | Runtime environment: `DEV`, `TEST`, or `PROD` |
+| `AZURE_KEYVAULT_URL` | unset | Azure Key Vault URL (required when `ENV=PROD`) |
+| `ETL_SQLITE_PATH` | `data/warehouse/violence_staging.db` | SQLite database file (used in `DEV`/`TEST`) |
 | `ETL_SOURCE_URL` | `http://www.datos.gov.co/api/v3/views/yi5j-5fe9/export.csv` | download source |
 | `ETL_LOG_LEVEL` | `INFO` | root log level |
 | `ETL_DEDUP_MODE` | `drop` | `drop` or `sum` duplicate policy |
 | `ETL_BRONZE_DIR` | `data/bronze` | landing/raw root |
-| `DATABASE_URL` | unset | full URL override, takes precedence |
 
-How the database URL is chosen:
+Environment behavior:
 
-1. If `DATABASE_URL` is set, it is used as-is. It wins over `ETL_DB_BACKEND`,
-   the `PG*` variables and `ETL_SQLITE_PATH` (including the `--sqlite-path`
-   flag). When `ETL_DB_BACKEND` is unset, the backend is inferred from the URL
-   scheme (`sqlite...` or `postgres...`).
-2. Otherwise `ETL_DB_BACKEND=sqlite` builds `sqlite:///<ETL_SQLITE_PATH>`.
-3. Otherwise the PostgreSQL dialect `postgresql+psycopg://` (psycopg 3) is
-   built from the `PG*` variables.
+- `ENV=DEV` or `ENV=TEST`: the pipeline uses SQLite at `ETL_SQLITE_PATH`. This
+  is the path for local development and automated tests.
+- `ENV=PROD`: the pipeline uses Azure PostgreSQL. Credentials are fetched from
+  Azure Key Vault at `AZURE_KEYVAULT_URL` using `DefaultAzureCredential`. The
+  Key Vault must contain the secrets `PGHOST`, `PGPORT`, `PGUSER`,
+  `PGPASSWORD`, and `PGDATABASE`. The PostgreSQL connection is created with
+  `sslmode=require`.
 
-Connection details are assembled with `sqlalchemy.engine.URL` objects (via
-`URL.create`) and handed to the engine and to Alembic as an object, so
-passwords containing `@`, `:`, `/` or `%` work and never pass through
-`ConfigParser` interpolation. `database_url_display` masks the password in
-logs. The CLI connection flags are `--backend postgres|sqlite` and
-`--sqlite-path PATH`; the PostgreSQL host, port, user, password and database
-are set only through the `PG*` environment variables or `DATABASE_URL`.
+PostgreSQL credentials are not read from local environment variables and there
+is no `DATABASE_URL` override. This keeps production credentials in Key Vault
+only.
 
-## Running against PostgreSQL
+The CLI global flags are `--sqlite-path PATH` (sets `ETL_SQLITE_PATH` for this
+run) and `--log-level LEVEL` (sets `ETL_LOG_LEVEL` for this run).
 
-PostgreSQL is the intended warehouse. The defaults match a local instance
-(`localhost:5432`, user `postgres`, password `postgres`, database `violence`).
+## Running against Azure PostgreSQL (PROD)
+
+Production targets an Azure PostgreSQL database. Configure access and run:
 
 ```
-createdb -U postgres violence
-
-export ETL_DB_BACKEND=postgres
-export PGHOST=localhost PGPORT=5432 PGUSER=postgres PGPASSWORD=postgres PGDATABASE=violence
+export ENV=PROD
+export AZURE_KEYVAULT_URL=https://violencekv.vault.azure.net/
 export PYTHONPATH=src
 
 python -m violence_etl.cli init-db
 python -m violence_etl.cli run-all
 python -m violence_etl.cli validate
 ```
+
+Requirements:
+
+- The process must be able to authenticate with Azure using
+  `DefaultAzureCredential` (for example via Azure CLI login, managed identity,
+  or supported environment-based credentials).
+- The Key Vault must expose secrets named `PGHOST`, `PGPORT`, `PGUSER`,
+  `PGPASSWORD`, and `PGDATABASE`.
+- Network access to the Key Vault and the PostgreSQL server must be available.
+  The connection uses `postgresql+psycopg://...?...sslmode=require`.
 
 `init-db` runs the migrations. The equivalent direct Alembic command, from the
 repository root with the same environment, is:
@@ -166,13 +172,14 @@ repository root with the same environment, is:
 PYTHONPATH=src alembic upgrade head
 ```
 
-`migrations/env.py` reads `violence_etl` settings, so the same migration history
-runs on both engines. The CLI resolves `alembic.ini` and `migrations/` from the
-repository root via `REPO_ROOT` (defined in `src/violence_etl/cli.py` and in the
-package `__init__` modules). The history has four revisions: `0001_bronze`,
-`0002_silver`, `0003_gold` and `0004_bronze_ingestion_unique`, which adds
-`UNIQUE(source_sha256)` to `bronze_ingestion_log`. Useful Alembic commands:
-`alembic current`, `alembic history`, `alembic downgrade base`.
+`migrations/env.py` reads `violence_etl` settings, so the same migration
+history runs on SQLite and PostgreSQL. The CLI resolves `alembic.ini` and
+`migrations/` from the repository root via `REPO_ROOT` (defined in
+`src/violence_etl/cli.py` and in the package `__init__` modules). The history
+has four revisions: `0001_bronze`, `0002_silver`, `0003_gold` and
+`0004_bronze_ingestion_unique`, which adds `UNIQUE(source_sha256)` to
+`bronze_ingestion_log`. Useful Alembic commands: `alembic current`,
+`alembic history`, `alembic downgrade base`.
 
 ## CLI reference
 
@@ -180,15 +187,15 @@ Entry point (from the repository root, with the package on the path):
 `PYTHONPATH=src python -m violence_etl.cli <command>`. Global flags go before
 the command:
 
-- `--backend postgres|sqlite`: sets `ETL_DB_BACKEND` for this run.
-- `--sqlite-path PATH`: sets `ETL_SQLITE_PATH` for this run.
+- `--sqlite-path PATH`: sets `ETL_SQLITE_PATH` for this run (used in
+  `DEV`/`TEST`).
 - `--log-level LEVEL`: sets `ETL_LOG_LEVEL` for this run.
 
 Commands and their flags:
 
 | Command | Flags | What it does |
 | --- | --- | --- |
-| `init-db` | none | run `alembic upgrade head` for the configured backend |
+| `init-db` | none | run `alembic upgrade head` for the configured environment |
 | `download` | none | fetch the CSV to `data/bronze/landing` and print the sha256 |
 | `ingest-bronze` | `--csv-path PATH`, `--force` | load bronze only |
 | `build-silver` | `--sha SHA`, `--force` | build silver only |
@@ -400,9 +407,10 @@ python -m pytest tests -q --cov=violence_etl --cov-report=term-missing
 python -m pytest tests/test_periods.py -q
 ```
 
-The suite runs fully offline against SQLite using the committed fixtures. The
-current result is 82 passed and 1 skipped. The skipped test is a slow,
-network-backed run against the real dataset; enable it with `ETL_FULL_DATASET=1`:
+The suite runs fully offline against SQLite using the committed fixtures
+(`ENV=TEST` in test configuration). The current result is 82 passed and 1
+skipped. The skipped test is a slow, network-backed run against the real
+dataset; enable it with `ETL_FULL_DATASET=1`:
 
 ```
 ETL_FULL_DATASET=1 python -m pytest tests -q -m full_dataset
@@ -425,8 +433,9 @@ Jupyter server, with the project `.venv` as the kernel. No separate
    Jupyter server and select the project `.venv` interpreter as the kernel.
 5. Run the cells, starting with the bootstrap cell.
 
-The notebook stack lives in `requirements-dev.txt`. See `notebooks/README.md`
-for the notebook list and prerequisites.
+Each notebook bootstrap sets `ENV=DEV` so it uses the local SQLite database and
+never touches PostgreSQL. The notebook stack lives in `requirements-dev.txt`.
+See `notebooks/README.md` for the notebook list and prerequisites.
 
 ## Makefile
 
@@ -436,7 +445,7 @@ for the notebook list and prerequisites.
 - `make init-db`: `python -m violence_etl.cli init-db`.
 - `make run-all`: `python -m violence_etl.cli run-all`.
 - `make sqlite-run`: `init-db` then `run-all` against
-  `data/warehouse/violence_staging.db` with `--backend sqlite`.
+  `data/warehouse/violence_staging.db` with `ENV=DEV`.
 
 The CLI targets invoke `python -m violence_etl.cli` directly. With the current
 `src/` layout (no editable install), run them with `PYTHONPATH=src` in the
@@ -451,14 +460,17 @@ CLI commands shown above.
   project in editable mode once packaging is configured. Do not run
   `python -m src.violence_etl.cli`, because internal imports use the
   `violence_etl.*` package name.
-- `init-db` cannot connect to PostgreSQL: check `PGHOST`, `PGPORT`, `PGUSER`,
-  `PGPASSWORD`, `PGDATABASE` or `DATABASE_URL`, and make sure the database
-  exists and the server is running.
-- A password with `%`, `@`, `:` or `/` causes a connection error: the built URL
-  handles these characters. If you set `DATABASE_URL` yourself, percent-encode
-  the password.
-- `--sqlite-path` seems ignored: `DATABASE_URL` takes precedence. Unset it when
-  the CLI flags should decide the target.
+- `AZURE_KEYVAULT_URL is required when ENV=PROD`: set `AZURE_KEYVAULT_URL` to
+  the vault URL (for example `https://violencekv.vault.azure.net/`).
+- `init-db` or `run-all` fails in `PROD` with Azure auth errors: ensure
+  `DefaultAzureCredential` can authenticate in the current environment and that
+  the identity has permission to read secrets in the vault.
+- `init-db` or `run-all` fails in `PROD` with missing/empty secret errors:
+  verify the vault contains `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, and
+  `PGDATABASE`.
+- PostgreSQL connection errors in `PROD`: verify the host/database values from
+  Key Vault, network/firewall rules, and that the server accepts TLS
+  connections (`sslmode=require` is enforced).
 - A repeat run does not reload bronze: use `--force`.
 - `SchemaError` on ingest: the CSV header must match
   `FECHA HECHO,COD_DEPTO,DEPARTAMENTO,COD_MUNI,MUNICIPIO,ZONA,CANTIDAD` exactly,
@@ -470,8 +482,10 @@ CLI commands shown above.
 
 ## Known limitations
 
-- The PostgreSQL path is implemented and covered by URL and offline-migration
-  tests, but it has not been executed locally. Local runs use SQLite.
+- The production PostgreSQL path uses Azure Key Vault and `sslmode=require` and
+  requires Azure authentication and network access to the vault and database; it
+  has not been executed locally in this environment. Local runs and automated
+  tests use SQLite (`ENV=DEV|TEST`).
 - The code and dependency markers target Python 3.8 through 3.14, but only
   Python 3.14 has been executed locally. Versions 3.8 through 3.13 have not
   been run here.

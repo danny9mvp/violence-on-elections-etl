@@ -33,6 +33,13 @@ The stack must import and run on both Python 3.8 and Python 3.14 from one source
 
 One dependency cannot span 3.8 to 3.14 with a single pin: pandas (and its numpy build). pandas 2.0.3 is the last release that installs on 3.8 but it has no CPython 3.13 or 3.14 wheels; pandas 2.3.3 has 3.9 to 3.14 wheels (including cp314) but requires >=3.9. Fix: environment markers in `requirements.txt`. The same marker pattern is used for numpy and, in `requirements-dev.txt`, for pytest-cov, coverage and the Jupyter dev stack. pytest, python-dotenv and requests use a single pin because one release spans the whole range, and psycopg2-binary is avoided entirely. PostgreSQL driver uses psycopg 3 (`psycopg==3.2.10` with `psycopg-binary==3.2.10`, which has cp38 through cp314 wheels), dialect URL `postgresql+psycopg://`.
 
+For production (`ENV=PROD`), PostgreSQL credentials are fetched from Azure Key
+Vault (`AZURE_KEYVAULT_URL`) using `DefaultAzureCredential` and secrets
+`PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE`. The connection uses
+`sslmode=require`. Runtime dependencies include `azure-identity` and
+`azure-keyvault-secrets` for this path. Local development and automated tests
+use SQLite (`ENV=DEV|TEST`).
+
 ## requirements.txt (runtime, pinned, with markers)
 
 ```
@@ -54,6 +61,10 @@ numpy==2.3.2; python_version >= "3.11"
 # HTTP, config, utils
 requests==2.31.0
 python-dotenv==1.0.1
+
+# Azure Key Vault (PostgreSQL credentials in PROD)
+azure-identity==1.17.1
+azure-keyvault-secrets==4.8.0
 ```
 
 Notes:
@@ -189,9 +200,9 @@ One codebase, two databases: use table-name prefixes (`bronze_`, `silver_`, `gol
 
 ## Settings module (single env-driven config)
 
-`src/violence_etl` exposes a frozen `Settings` dataclass, a
-`get_settings()` factory and three URL helpers. The full variable table with
-defaults is in `README.md`; this section records the design intent.
+`src/violence_etl` exposes a frozen `Settings` dataclass, a `get_settings()`
+factory and URL helpers. The full variable table is in `README.md`; this
+section records the design intent.
 
 ```python
 from __future__ import annotations
@@ -199,62 +210,44 @@ import os
 from dataclasses import dataclass, field
 from typing import Optional
 from dotenv import load_dotenv
-from sqlalchemy.engine import URL, make_url
+from sqlalchemy.engine import URL
 
 load_dotenv()
 
 DEFAULT_SOURCE_URL = "http://www.datos.gov.co/api/v3/views/yi5j-5fe9/export.csv"
 DEFAULT_SQLITE_PATH = "data/warehouse/violence_staging.db"
+VALID_ENVS = ("DEV", "TEST", "PROD")
 
 @dataclass(frozen=True)
 class Settings:
-    backend: str          # "postgres" | "sqlite"
-    pg_host: str
-    pg_port: int
-    pg_user: str
-    pg_password: str = field(repr=False)
-    pg_database: str
+    env: str              # "DEV" | "TEST" | "PROD"
     sqlite_path: str
     source_url: str
     log_level: str
     dedup_mode: str       # "drop" | "sum"
     bronze_dir: str
-    database_url_override: Optional[str] = field(default=None, repr=False)
+    key_vault_url: Optional[str] = field(default=None, repr=False)
 
-def get_settings() -> Settings:
-    override = os.environ.get("DATABASE_URL") or None
-    backend = _infer_backend(os.environ.get("ETL_DB_BACKEND", ""), override)
-    return Settings(
-        backend=backend,
-        pg_host=os.environ.get("PGHOST", "localhost"),
-        pg_port=int(os.environ.get("PGPORT", "5432")),
-        pg_user=os.environ.get("PGUSER", "postgres"),
-        pg_password=os.environ.get("PGPASSWORD", "postgres"),
-        pg_database=os.environ.get("PGDATABASE", "violence"),
-        sqlite_path=os.environ.get("ETL_SQLITE_PATH", DEFAULT_SQLITE_PATH),
-        source_url=os.environ.get("ETL_SOURCE_URL", DEFAULT_SOURCE_URL),
-        log_level=os.environ.get("ETL_LOG_LEVEL", "INFO"),
-        dedup_mode=os.environ.get("ETL_DEDUP_MODE", "drop"),
-        bronze_dir=os.environ.get("ETL_BRONZE_DIR", "data/bronze"),
-        database_url_override=override,
-    )
+    @property
+    def is_sqlite(self) -> bool:
+        return self.env in ("DEV", "TEST")
 ```
 
 Design points:
 
-- `database_url_object()` builds a `sqlalchemy.engine.URL` with `URL.create`, or
-  returns `make_url(DATABASE_URL)` when the override is set. Handing the object
-  to `create_engine` and to Alembic (`cfg.attributes["sqlalchemy.url"]`) keeps
-  raw credentials out of string interpolation and out of `ConfigParser`, so
-  passwords with `@`, `:`, `/` or `%` work.
-- `database_url()` renders the URL as a string with the password visible (the
-  override is returned verbatim). `database_url_display()` masks the password
-  for logging.
-- `DATABASE_URL` takes precedence over `ETL_DB_BACKEND`, the `PG*` variables and
-  `ETL_SQLITE_PATH`. `_infer_backend` reads the override scheme only when
-  `ETL_DB_BACKEND` is empty.
-- `pg_password` and `database_url_override` use `repr=False` so credentials do
-  not appear in `repr(settings)`.
+- `ENV` selects the runtime target. `DEV` and `TEST` use SQLite at
+  `ETL_SQLITE_PATH` (local development and automated tests). `PROD` uses Azure
+  PostgreSQL.
+- PostgreSQL credentials are not read from local environment variables and there
+  is no `DATABASE_URL` override. In `PROD`, `AZURE_KEYVAULT_URL` is required and
+  credentials are fetched from Key Vault secrets `PGHOST`, `PGPORT`, `PGUSER`,
+  `PGPASSWORD`, and `PGDATABASE` using `DefaultAzureCredential`.
+- `database_url_object()` returns a SQLite URL for `DEV`/`TEST`, or a
+  `postgresql+psycopg://` URL with `sslmode=require` for `PROD` (built from Key
+  Vault secrets). `database_url_display()` masks the password for logging.
+- The CLI global flags `--sqlite-path` and `--log-level` are pushed into the
+  environment before `get_settings()` is called, so the rest of the code path is
+  unchanged.
 
 `.env.example` contains the keys with their defaults; `.env` is gitignored.
 
@@ -532,7 +525,7 @@ Each migration has a working `downgrade`.
 
 `src/violence_etl` uses `argparse` (stdlib, identical on 3.8/3.14). Entry point (from the repository root): `PYTHONPATH=src python -m violence_etl.cli <command>`.
 
-The command list, the per-command flags and the `Makefile` aliases are in `README.md`. Design note: the global flags (`--backend`, `--sqlite-path`, `--log-level`) are pushed into the environment before `get_settings()` is called, so the rest of the code path is unchanged.
+The command list, the per-command flags and the `Makefile` aliases are in `README.md`. Design note: the global flags (`--sqlite-path`, `--log-level`) are pushed into the environment before `get_settings()` is called, so the rest of the code path is unchanged. Runtime target selection is controlled by `ENV` (`DEV|TEST|PROD`) and, for `PROD`, `AZURE_KEYVAULT_URL`.
 
 ## Logging
 
@@ -584,7 +577,7 @@ Fixtures in `tests/conftest.py`:
 Unit tests:
 - `test_periods.py`: the full 2003..2026 table asserted year by year; the reference cycle `{2013: pre-electoral, 2014: electoral, 2015: post-electoral, 2016: intermediate, 2017: pre-electoral}`; `2002 -> electoral`, `2026 -> electoral`, `2001 -> pre-electoral`; `2000 -> unclassified`; a non-4-year `ELECTION_YEARS` triggers `is_cycle_valid` False.
 - `test_schema.py`: exact expected header list, order, and case; mismatch raises `SchemaError`.
-- `test_settings.py`: defaults when env is empty; overrides via `monkeypatch.setenv`; `database_url` and `database_url_object` return the `postgresql+psycopg://` and `sqlite:///` forms; `DATABASE_URL` override wins and infers the backend; passwords with special characters round-trip and are masked in `database_url_display`; `repr(settings)` hides the password; the Alembic config keeps `%` out of `ConfigParser`; invalid `PGPORT` raises.
+- `test_settings.py`: defaults to `ENV=DEV` with SQLite; `DEV`/`TEST` build SQLite URLs; invalid `ENV` raises; `ENV=PROD` requires `AZURE_KEYVAULT_URL`; PROD fetches PostgreSQL credentials from Key Vault (monkeypatched) and returns a URL with `sslmode=require`; masked display URLs do not leak the password.
 - `test_silver.py`: all R1..R13 rules individually; zero padding preserved on load (assert `cod_depto == "05"`, `cod_muni == "05660"`); date `31/08/2026` parses to `2026-08-31`; `11/12/2024` parses as 11 Dec not 12 Nov; exact-duplicate rows collapse (3 identical -> 1); `dedup_mode="sum"` sums instead; rejected rows land in `silver_rejected_rows` with the expected reason; `inserted_rows` tracks actual writes (second run is 0); a new snapshot purges the previous sha.
 - `test_bronze.py`: header validation; `keep_default_na=False` keeps empty strings as empty strings; content hash stable; re-ingest of the same sha skips and updates the single log row; `--force` reloads without growing the log.
 - `test_gold.py`: top 5 ordering and rank values on the sample; `gold_crimes_by_department` totals equal the silver total; `gold_crimes_by_calendar` grain uniqueness; `gold_crimes_by_electoral_period` `pct_of_total` sums to about 100; top-5 truncates when more than five departments exist; the period order matches the expected labels; `export_csv=True` writes all four files.
@@ -606,7 +599,7 @@ Notebooks use the PyCharm IDE managed Jupyter server (Project Settings > Python 
 - `notebooks/02_silver_validation.ipynb`: run `build-silver` against SQLite, show before/after row counts, the dedup effect (15,696 to 14,212, total crimes 15,696 to 14,212), the rejected-rows breakdown, and the electoral-period distribution per year using the mapping table.
 - `notebooks/03_gold_analysis.ipynb`: query the four `gold_*` tables, render the top 5 departments, the by-department ranking, the calendar heat-style tables, and the crimes-by-electoral-period share, as a template that the README links to.
 
-Each notebook starts with a bootstrap cell that inserts the repo root on `sys.path` and calls `get_settings()` with `ETL_DB_BACKEND=sqlite` so notebooks never touch PostgreSQL by accident.
+Each notebook starts with a bootstrap cell that inserts the repo root on `sys.path` and sets `ENV=DEV` so notebooks use the local SQLite database and never touch PostgreSQL by accident.
 
 ## .gitignore
 
@@ -678,7 +671,7 @@ Run `make lint` (ruff, configured in `pyproject.toml`) and `python -m pytest tes
 ## Acceptance criteria (definition of done)
 
 1. `python -m pytest tests -q` passes on Python 3.8 and on Python 3.14.
-2. `PYTHONPATH=src python -m violence_etl.cli init-db` followed by `run-all` completes against SQLite and against PostgreSQL 16 without code changes, only via `ETL_DB_BACKEND`.
+2. `PYTHONPATH=src python -m violence_etl.cli init-db` followed by `run-all` completes against SQLite (`ENV=DEV|TEST`) and against Azure PostgreSQL (`ENV=PROD` with `AZURE_KEYVAULT_URL` and Key Vault credentials) without code changes, only via environment configuration.
 3. `bronze_crimes_raw` holds exactly 15,696 rows for the verified source sha, every source field text, plus `source_url`, `load_ts`, `source_file`.
 4. `silver_crimes` holds 14,212 rows with `ETL_DEDUP_MODE=drop`, and the removed count is 1,484. Changing to `sum` yields 14,212 rows and a total of 15,696. The chosen default and its effect are documented in `README.md`.
 5. Zero unmapped years: every `year` in 2003..2026 has a non-null `electoral_period`, and the mapper matches the 24-row table exactly.

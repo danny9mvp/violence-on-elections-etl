@@ -1,9 +1,11 @@
-"""Single env-driven configuration module.
+"""Environment-driven configuration module.
 
-Defaults match the required PostgreSQL warehouse credentials. The whole ETL
-can run against SQLite with no PostgreSQL instance by exporting
-``ETL_DB_BACKEND=sqlite``. A full ``DATABASE_URL`` may also be supplied and
-then takes precedence over the individual pieces.
+``ENV`` selects the runtime target:
+- ``DEV`` / ``TEST``: SQLite (local dev and automated tests)
+- ``PROD``: Azure PostgreSQL, with credentials fetched from Azure Key Vault
+
+PostgreSQL credentials are not read from local environment variables; in PROD
+they come only from Key Vault via DefaultAzureCredential.
 """
 from __future__ import annotations
 
@@ -12,103 +14,80 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from dotenv import load_dotenv
-from sqlalchemy.engine import URL, make_url
+from sqlalchemy.engine import URL
 
 load_dotenv()
 
 DEFAULT_SOURCE_URL = "http://www.datos.gov.co/api/v3/views/yi5j-5fe9/export.csv"
 DEFAULT_SQLITE_PATH = "data/warehouse/violence_staging.db"
+VALID_ENVS = ("DEV", "TEST", "PROD")
 
 
 @dataclass(frozen=True)
 class Settings:
-    backend: str          # "postgres" | "sqlite"
-    pg_host: str
-    pg_port: int
-    pg_user: str
-    pg_password: str = field(repr=False)
-    pg_database: str
+    env: str              # "DEV" | "TEST" | "PROD"
     sqlite_path: str
     source_url: str
     log_level: str
     dedup_mode: str       # "drop" | "sum"
     bronze_dir: str
-    database_url_override: Optional[str] = field(default=None, repr=False)
+    key_vault_url: Optional[str] = field(default=None, repr=False)
+
+    @property
+    def is_sqlite(self) -> bool:
+        return self.env in ("DEV", "TEST")
 
 
 def _env(key: str, default: str) -> str:
-    return os.environ.get(key, default)
+    value = os.environ.get(key)
+    if value is None or value == "":
+        return default
+    return value
 
 
-def _infer_backend(explicit: str, override: Optional[str]) -> str:
-    if explicit:
-        return explicit.strip().lower()
-    if override:
-        scheme = override.split(":", 1)[0].lower()
-        if scheme.startswith("sqlite"):
-            return "sqlite"
-        if scheme.startswith("postgres"):
-            return "postgres"
-    return "postgres"
+def _normalize_env(value: str) -> str:
+    env = (value or "DEV").strip().upper()
+    if env not in VALID_ENVS:
+        raise ValueError("ENV must be one of: {0}".format(", ".join(VALID_ENVS)))
+    return env
 
 
 def get_settings() -> Settings:
-    override = os.environ.get("DATABASE_URL") or None
-    backend = _infer_backend(_env("ETL_DB_BACKEND", ""), override)
+    env = _normalize_env(_env("ENV", "DEV"))
+    key_vault_url = os.environ.get("AZURE_KEYVAULT_URL") or None
+    if env == "PROD" and not key_vault_url:
+        raise ValueError("AZURE_KEYVAULT_URL is required when ENV=PROD")
     return Settings(
-        backend=backend,
-        pg_host=_env("PGHOST", "localhost"),
-        pg_port=int(_env("PGPORT", "5432")),
-        pg_user=_env("PGUSER", "postgres"),
-        pg_password=_env("PGPASSWORD", "postgres"),
-        pg_database=_env("PGDATABASE", "violence"),
+        env=env,
         sqlite_path=_env("ETL_SQLITE_PATH", DEFAULT_SQLITE_PATH),
         source_url=_env("ETL_SOURCE_URL", DEFAULT_SOURCE_URL),
         log_level=_env("ETL_LOG_LEVEL", "INFO"),
         dedup_mode=_env("ETL_DEDUP_MODE", "drop"),
         bronze_dir=_env("ETL_BRONZE_DIR", "data/bronze"),
-        database_url_override=override,
+        key_vault_url=key_vault_url,
     )
 
 
 def database_url_object(settings: Optional[Settings] = None) -> URL:
-    """Build a :class:`sqlalchemy.engine.URL` without string interpolation.
+    """Build a :class:`sqlalchemy.engine.URL` for the configured environment.
 
-    Using ``URL.create`` keeps user and password as raw components, so
-    passwords containing ``@``, ``:``, ``/`` or ``%`` are never mistaken for
-    URL syntax. The object can be handed straight to ``create_engine`` or to an
-    Alembic ``Config`` (``cfg.attributes["sqlalchemy.url"]``), bypassing
-    ``ConfigParser`` interpolation which chokes on ``%``.
+    DEV/TEST return a SQLite URL. PROD fetches PostgreSQL credentials from
+    Azure Key Vault and returns a URL with sslmode=require.
     """
     s = settings or get_settings()
-    if s.database_url_override:
-        return make_url(s.database_url_override)
-    if s.backend == "sqlite":
+    if s.is_sqlite:
         return URL.create("sqlite", database=s.sqlite_path)
-    return URL.create(
-        "postgresql+psycopg",
-        username=s.pg_user,
-        password=s.pg_password,
-        host=s.pg_host,
-        port=s.pg_port,
-        database=s.pg_database,
-    )
+
+    from violence_etl.config.keyvault import postgres_url_from_key_vault
+
+    return postgres_url_from_key_vault(s.key_vault_url or "")
 
 
 def database_url(settings: Optional[Settings] = None) -> str:
-    """Render the connection URL as a string with the password visible.
-
-    A ``DATABASE_URL`` override is returned verbatim so it round-trips exactly.
-    """
-    s = settings or get_settings()
-    if s.database_url_override:
-        return s.database_url_override
-    return database_url_object(s).render_as_string(hide_password=False)
+    """Render the connection URL as a string with the password visible."""
+    return database_url_object(settings).render_as_string(hide_password=False)
 
 
 def database_url_display(settings: Optional[Settings] = None) -> str:
     """Like :func:`database_url` but with the password masked for logging."""
-    s = settings or get_settings()
-    if s.database_url_override:
-        return make_url(s.database_url_override).render_as_string(hide_password=True)
-    return database_url_object(s).render_as_string(hide_password=True)
+    return database_url_object(settings).render_as_string(hide_password=True)
