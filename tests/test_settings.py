@@ -23,6 +23,7 @@ def test_defaults_to_dev_sqlite():
     assert s.dedup_mode == "drop"
     assert s.bronze_dir == "data/bronze"
     assert s.key_vault_url is None
+    assert s.blob_storage is None
 
 
 def test_dev_and_test_build_sqlite_url(monkeypatch, tmp_path):
@@ -53,6 +54,7 @@ def test_prod_fetches_postgres_url_from_key_vault(monkeypatch):
     monkeypatch.setenv("AZURE_KEYVAULT_URL", "https://violencekv.vault.azure.net/")
 
     captured = {}
+    blob_captured = {}
 
     def fake_fetch(vault_url):
         captured["vault_url"] = vault_url
@@ -66,12 +68,30 @@ def test_prod_fetches_postgres_url_from_key_vault(monkeypatch):
             query={"sslmode": "require"},
         )
 
+    def fake_blob_fetch(vault_url):
+        blob_captured["vault_url"] = vault_url
+        from violence_etl.config.settings import BlobStorageConfig
+
+        return BlobStorageConfig(
+            storage_account_name="acct",
+            bronze_container="bronze",
+            silver_container="silver",
+            gold_container="gold",
+        )
+
     monkeypatch.setattr(
         "violence_etl.config.settings.postgres_url_from_key_vault", fake_fetch
+    )
+    monkeypatch.setattr(
+        "violence_etl.config.settings.blob_storage_config_from_key_vault",
+        fake_blob_fetch,
     )
     s = get_settings()
     assert s.env == "PROD"
     assert s.is_sqlite is False
+    assert blob_captured["vault_url"] == "https://violencekv.vault.azure.net/"
+    assert s.blob_storage is not None
+    assert s.blob_storage.storage_account_name == "acct"
 
     url = database_url_object(s)
     assert captured["vault_url"] == "https://violencekv.vault.azure.net/"
