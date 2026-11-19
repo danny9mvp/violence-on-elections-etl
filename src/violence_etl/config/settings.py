@@ -28,6 +28,19 @@ _PGUSER = "PGUSER"
 _PGPASSWORD = "PGPASSWORD"
 _PGDATABASE = "PGDATABASE"
 
+_STORAGEACCOUNT = "STORAGEACCOUNT"
+_BRZECONTAINER = "BRZECONTAINER"
+_SILVCONTAINER = "SILVCONTAINER"
+_GOLDCONTAINER = "GOLDCONTAINER"
+
+
+@dataclass(frozen=True)
+class BlobStorageConfig:
+    storage_account_name: str
+    bronze_container: str
+    silver_container: str
+    gold_container: str
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -38,6 +51,7 @@ class Settings:
     dedup_mode: str       # "drop" | "sum"
     bronze_dir: str
     key_vault_url: Optional[str] = field(default=None, repr=False)
+    blob_storage: Optional[BlobStorageConfig] = None
 
     @property
     def is_sqlite(self) -> bool:
@@ -63,6 +77,9 @@ def get_settings() -> Settings:
     key_vault_url = os.environ.get("AZURE_KEYVAULT_URL") or None
     if env == "PROD" and not key_vault_url:
         raise ValueError("AZURE_KEYVAULT_URL is required when ENV=PROD")
+    blob_storage = None
+    if env == "PROD":
+        blob_storage = blob_storage_config_from_key_vault(key_vault_url)
     return Settings(
         env=env,
         sqlite_path=_env("ETL_SQLITE_PATH", DEFAULT_SQLITE_PATH),
@@ -71,6 +88,7 @@ def get_settings() -> Settings:
         dedup_mode=_env("ETL_DEDUP_MODE", "drop"),
         bronze_dir=_env("ETL_BRONZE_DIR", "data/bronze"),
         key_vault_url=key_vault_url,
+        blob_storage=blob_storage,
     )
 
 
@@ -101,6 +119,32 @@ def postgres_url_from_key_vault(vault_url: str) -> URL:
         port=port,
         database=database,
         query={"sslmode": "require"},
+    )
+
+
+def blob_storage_config_from_key_vault(
+    vault_url: str,
+    credential: Optional[object] = None,
+    client: Optional[object] = None,
+) -> BlobStorageConfig:
+    """Build blob storage configuration from Key Vault secrets in ``vault_url``."""
+    if not vault_url:
+        raise ValueError("AZURE_KEYVAULT_URL is required when ENV=PROD")
+
+    if client is None:
+        from violence_etl.clients.key_vault import KeyVaultClient
+
+        client = KeyVaultClient(vault_url, credential=credential)
+
+    storage_account_name = client.get_secret(_STORAGEACCOUNT)
+    bronze_container = client.get_secret(_BRZECONTAINER)
+    silver_container = client.get_secret(_SILVCONTAINER)
+    gold_container = client.get_secret(_GOLDCONTAINER)
+    return BlobStorageConfig(
+        storage_account_name=storage_account_name,
+        bronze_container=bronze_container,
+        silver_container=silver_container,
+        gold_container=gold_container,
     )
 
 

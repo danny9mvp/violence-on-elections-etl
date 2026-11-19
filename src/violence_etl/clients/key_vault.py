@@ -23,6 +23,7 @@ class KeyVaultClient:
         credential: Optional[Any] = None,
         secret_client: Optional[Any] = None,
     ) -> None:
+        # TODO: Refactor constructor to only assign injected dependencies; move conditional creation and SDK import/credential logic to a factory or builder in a later feature.
         self.vault_url = vault_url
         self._secret_client = secret_client
 

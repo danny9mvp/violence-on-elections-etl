@@ -27,6 +27,7 @@ from violence_etl.db.models.silver_crimes import SilverCrimes
 from violence_etl.db.models.silver_rejected_rows import SilverRejectedRows
 from violence_etl.exceptions.etl_exception import EtlException
 from violence_etl.pipeline import run_all, run_bronze, run_gold, run_silver
+from violence_etl.storage.factory import get_artifact_storage
 from violence_etl.utils import io as etl_io
 
 logger = logging.getLogger("violence_etl.cli")
@@ -62,8 +63,9 @@ def cmd_init_db(settings: Settings, args: argparse.Namespace) -> int:
 
 
 def cmd_download(settings: Settings, args: argparse.Namespace) -> int:
+    storage = get_artifact_storage(settings)
     data = etl_io.download_source(settings.source_url)
-    path, sha, written = etl_io.write_landing(settings.bronze_dir, data)
+    path, sha, written = storage.write_landing(data)
     print("download: {0} bytes sha256={1} landing={2} new={3}".format(
         len(data), sha, path, written
     ))
@@ -98,7 +100,7 @@ def cmd_build_silver(settings: Settings, args: argparse.Namespace) -> int:
 
 def cmd_build_gold(settings: Settings, args: argparse.Namespace) -> int:
     engine = make_engine(settings=settings)
-    result = run_gold(engine, export_csv=args.export_csv)
+    result = run_gold(engine, export_csv=args.export_csv, settings=settings)
     print("build-gold: grand_total={0} tables={1}".format(
         result["grand_total"],
         {
