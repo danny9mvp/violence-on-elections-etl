@@ -15,11 +15,12 @@ import pandas as pd
 from sqlalchemy import delete, func, insert, select
 from sqlalchemy.engine import Engine
 
-from violence_etl.utils import io as etl_io
+from violence_etl.config.settings import Settings
 from violence_etl.db.models.bronze_crimes_raw import BronzeCrimesRaw
 from violence_etl.db.models.bronze_ingestion_log import BronzeIngestionLog
+from violence_etl.storage.factory import get_artifact_storage
+from violence_etl.utils import io as etl_io
 from violence_etl.utils.schema import COLUMN_MAP, validate_header
-from violence_etl.config.settings import Settings
 from violence_etl.utils.timeutil import naive_utc_now
 
 logger = logging.getLogger(__name__)
@@ -95,23 +96,24 @@ def ingest_bronze(
 ) -> Dict[str, object]:
     """Download (or read) the source CSV and load it into bronze_crimes_raw."""
     started = time.time()
+    storage = get_artifact_storage(settings)
 
     if csv_path is None:
         logger.info("bronze: downloading %s", settings.source_url)
         data = etl_io.download_source(settings.source_url)
-        source_file = etl_io.write_run_raw_copy(settings.bronze_dir, data)
-        landing, sha, written = etl_io.write_landing(settings.bronze_dir, data)
+        source_file = storage.write_run_raw_copy(data)
+        landing, sha, written = storage.write_landing(data)
         logger.info("bronze: landing %s (new=%s) sha256=%s", landing, written, sha)
     else:
         if not os.path.exists(csv_path):
             raise FileNotFoundError(csv_path)
         with open(csv_path, "rb") as fh:
             data = fh.read()
-        source_file = etl_io.write_run_raw_copy(settings.bronze_dir, data)
-        landing, sha, written = etl_io.write_landing(settings.bronze_dir, data)
-        logger.info("bronze: csv_path=%s sha256=%s", csv_path, sha)
+        source_file = storage.write_run_raw_copy(data)
+        landing, sha, written = storage.write_landing(data)
+        logger.info("bronze: csv_path=%s landing=%s sha256=%s", csv_path, landing, sha)
 
-    df = etl_io.read_csv(landing)
+    df = storage.read_landing_csv(sha)
     validate_header(list(df.columns))
 
     if not force and _has_raw_rows(engine, sha):

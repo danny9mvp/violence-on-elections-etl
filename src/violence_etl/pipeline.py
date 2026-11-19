@@ -36,8 +36,9 @@ def run_gold(
     engine: Engine,
     export_csv: bool = False,
     export_dir: str = "data/gold",
+    settings: Optional[Settings] = None,
 ) -> Dict[str, object]:
-    return build_gold(engine, export_csv=export_csv, export_dir=export_dir)
+    return build_gold(engine, export_csv=export_csv, export_dir=export_dir, settings=settings)
 
 
 def run_all(
@@ -50,7 +51,7 @@ def run_all(
     logger.info("pipeline: run-all start (env=%s)", settings.env)
     bronze = run_bronze(engine, settings, csv_path=csv_path, force=force)
     silver = run_silver(engine, settings, sha=str(bronze.get("source_sha256") or "") or None, force=force)
-    gold = run_gold(engine, export_csv=export_csv)
+    gold = run_gold(engine, export_csv=export_csv, settings=settings)
     logger.info(
         "pipeline: run-all done raw=%s silver=%s total_crimes=%s",
         bronze.get("raw_rows"),

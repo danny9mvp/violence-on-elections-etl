@@ -33,12 +33,20 @@ The stack must import and run on both Python 3.8 and Python 3.14 from one source
 
 One dependency cannot span 3.8 to 3.14 with a single pin: pandas (and its numpy build). pandas 2.0.3 is the last release that installs on 3.8 but it has no CPython 3.13 or 3.14 wheels; pandas 2.3.3 has 3.9 to 3.14 wheels (including cp314) but requires >=3.9. Fix: environment markers in `requirements.txt`. The same marker pattern is used for numpy and, in `requirements-dev.txt`, for pytest-cov, coverage and the Jupyter dev stack. pytest, python-dotenv and requests use a single pin because one release spans the whole range, and psycopg2-binary is avoided entirely. PostgreSQL driver uses psycopg 3 (`psycopg==3.2.10` with `psycopg-binary==3.2.10`, which has cp38 through cp314 wheels), dialect URL `postgresql+psycopg://`.
 
-For production (`ENV=PROD`), PostgreSQL credentials are fetched from Azure Key
-Vault (`AZURE_KEYVAULT_URL`) using `DefaultAzureCredential` and secrets
-`PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE`. The connection uses
-`sslmode=require`. Runtime dependencies include `azure-identity` and
-`azure-keyvault-secrets` for this path. Local development and automated tests
-use SQLite (`ENV=DEV|TEST`).
+For production (`ENV=PROD`), PostgreSQL credentials and blob storage
+configuration are fetched from Azure Key Vault (`AZURE_KEYVAULT_URL`) using
+`DefaultAzureCredential`. Database secrets are `PGHOST`, `PGPORT`, `PGUSER`,
+`PGPASSWORD`, and `PGDATABASE`; blob storage secrets are `STORAGEACCOUNT`,
+`BRZECONTAINER`, `SILVCONTAINER`, and `GOLDCONTAINER`. The PostgreSQL
+connection uses `sslmode=require`. Bronze and gold CSV artifacts are stored in
+Azure Blob Storage containers in `PROD` (landing/raw in `BRZECONTAINER`, gold
+exports in the `GOLDCONTAINER` root). `SILVCONTAINER` is configured now as a
+reserved location for future silver CSV artifacts. `get_settings()` eagerly
+fetches and validates blob storage configuration in `PROD` so missing or
+invalid values fail fast at startup. Runtime dependencies include
+`azure-identity`, `azure-keyvault-secrets`, and `azure-storage-blob`; Azure SDK
+imports are lazy so local development and automated tests use SQLite and local
+`data/` artifacts (`ENV=DEV|TEST`) without requiring Azure packages at runtime.
 
 ## requirements.txt (runtime, pinned, with markers)
 
@@ -65,6 +73,9 @@ python-dotenv==1.0.1
 # Azure Key Vault (PostgreSQL credentials in PROD)
 azure-identity==1.17.1
 azure-keyvault-secrets==4.8.0
+
+# Azure Blob Storage (artifact storage in PROD)
+azure-storage-blob==12.22.0
 ```
 
 Notes:
@@ -135,7 +146,8 @@ ViolenceOnElectionsEtl/
 │       ├── pipeline.py            # orchestration (run_bronze/silver/gold/run_all)
 │       ├── clients/
 │       │   ├── __init__.py
-│       │   └── key_vault.py       # generic KeyVaultClient secret reader
+│       │   ├── key_vault.py       # generic KeyVaultClient secret reader
+│       │   └── object_storage.py  # low-level object storage client
 │       ├── config/
 │       │   ├── __init__.py        # REPO_ROOT (repo root)
 │       │   ├── settings.py        # env-driven config
@@ -152,6 +164,11 @@ ViolenceOnElectionsEtl/
 │       ├── exceptions/
 │       │   ├── __init__.py        # REPO_ROOT
 │       │   └── *.py               # typed exceptions
+│       ├── storage/
+│       │   ├── __init__.py        # package marker
+│       │   ├── blob_storage.py    # blob artifact storage service (PROD)
+│       │   ├── factory.py         # artifact storage factory
+│       │   └── local_storage.py   # local artifact storage service (DEV/TEST)
 │       ├── transformations/
 │       │   ├── __init__.py        # REPO_ROOT
 │       │   ├── bronze.py
@@ -203,9 +220,9 @@ One codebase, two databases: use table-name prefixes (`bronze_`, `silver_`, `gol
 
 ## Settings module (single env-driven config)
 
-`src/violence_etl` exposes a frozen `Settings` dataclass, a `get_settings()`
-factory and URL helpers. The full variable table is in `README.md`; this
-section records the design intent.
+`src/violence_etl` exposes frozen `Settings` and `BlobStorageConfig`
+dataclasses, a `get_settings()` factory, and URL/config helpers. The full
+variable table is in `README.md`; this section records the design intent.
 
 ```python
 from __future__ import annotations
@@ -222,6 +239,13 @@ DEFAULT_SQLITE_PATH = "data/warehouse/violence_staging.db"
 VALID_ENVS = ("DEV", "TEST", "PROD")
 
 @dataclass(frozen=True)
+class BlobStorageConfig:
+    storage_account_name: str
+    bronze_container: str
+    silver_container: str
+    gold_container: str
+
+@dataclass(frozen=True)
 class Settings:
     env: str              # "DEV" | "TEST" | "PROD"
     sqlite_path: str
@@ -230,6 +254,7 @@ class Settings:
     dedup_mode: str       # "drop" | "sum"
     bronze_dir: str
     key_vault_url: Optional[str] = field(default=None, repr=False)
+    blob_storage: Optional[BlobStorageConfig] = None
 
     @property
     def is_sqlite(self) -> bool:
@@ -239,12 +264,16 @@ class Settings:
 Design points:
 
 - `ENV` selects the runtime target. `DEV` and `TEST` use SQLite at
-  `ETL_SQLITE_PATH` (local development and automated tests). `PROD` uses Azure
-  PostgreSQL.
+  `ETL_SQLITE_PATH` and local `data/` artifact paths. `PROD` uses Azure
+  PostgreSQL and Azure Blob Storage for bronze/gold CSV artifacts.
 - PostgreSQL credentials are not read from local environment variables and there
-  is no `DATABASE_URL` override. In `PROD`, `AZURE_KEYVAULT_URL` is required and
-  credentials are fetched from Key Vault secrets `PGHOST`, `PGPORT`, `PGUSER`,
-  `PGPASSWORD`, and `PGDATABASE` using `DefaultAzureCredential`.
+  is no `DATABASE_URL` override. In `PROD`, `AZURE_KEYVAULT_URL` is required.
+  `get_settings()` eagerly fetches and validates blob storage configuration
+  from Key Vault using `DefaultAzureCredential` (secrets `STORAGEACCOUNT`,
+  `BRZECONTAINER`, `SILVCONTAINER`, `GOLDCONTAINER`) so missing or invalid
+  values fail fast at startup. Database secrets (`PGHOST`, `PGPORT`, `PGUSER`,
+  `PGPASSWORD`, `PGDATABASE`) are resolved from Key Vault when building the
+  PostgreSQL URL.
 - Generic secret reads use `KeyVaultClient` in
   `src/violence_etl/clients/key_vault.py`. It works for any secret, accepts an
   injected credential or secret client, and imports the Azure SDK lazily, so
@@ -253,7 +282,14 @@ Design points:
   secret names, parses `PGPORT` with `int()`, and builds the
   `postgresql+psycopg://` URL with `sslmode=require`. `database_url_object()`
   returns a SQLite URL for `DEV`/`TEST` and calls this helper for `PROD`.
+  `blob_storage_config_from_key_vault(vault_url, credential=None, client=None)`
+  resolves `BlobStorageConfig` from the four blob secrets via `KeyVaultClient`.
   `database_url_display()` masks the password for logging.
+- `get_artifact_storage(settings)` in `src/violence_etl/storage/factory.py`
+  returns `LocalArtifactStorage` for `DEV`/`TEST` and `BlobArtifactStorage` for
+  `PROD`. Low-level object storage access lives in
+  `src/violence_etl/clients/object_storage.py`; storage services use that client
+  and keep Azure SDK usage out of `storage/__init__.py`.
 - The CLI global flags `--sqlite-path` and `--log-level` are pushed into the
   environment before `get_settings()` is called, so the rest of the code path is
   unchanged.
@@ -265,11 +301,21 @@ Design points:
 Goal: preserve the source verbatim and mirror it exactly, plus ingestion metadata.
 
 Artifacts:
-1. Landing file: `data/bronze/landing/<sha256>.csv`, the exact downloaded bytes. Name is the content hash, so re-downloading identical content never writes a second file. Also write `data/bronze/raw/yi5j-5fe9_<utcstamp>.csv` as a run-stamped copy referenced by the ingestion log.
-2. Raw table `bronze_crimes_raw`: every source column stored as text, plus metadata columns.
-3. Ingestion log `bronze_ingestion_log`: one row per source content hash,
+1. Landing artifact: exact downloaded bytes named by content hash. In
+   `DEV`/`TEST` this is `data/bronze/landing/<sha256>.csv`; in `PROD` this is
+   `landing/<sha256>.csv` in `BRZECONTAINER`.
+2. Run-stamped raw copy: `raw/yi5j-5fe9_<utcstamp>.csv`, stored under the local
+   bronze directory in `DEV`/`TEST` or in `BRZECONTAINER` in `PROD`.
+3. Raw table `bronze_crimes_raw`: every source column stored as text, plus
+   metadata columns.
+4. Ingestion log `bronze_ingestion_log`: one row per source content hash,
    updated in place on every attempt (`loaded` or `skipped`), so repeated runs
    are idempotent. See README "Idempotency and reload semantics".
+
+In `PROD`, reported bronze artifact identifiers (`source_file`, download landing
+location) are blob names within the bronze container. When `csv_path` is
+provided, its bytes are read locally but resulting bronze artifacts are written
+to the active backend.
 
 ## Table definitions (SQLAlchemy classic column style, `src/violence_etl`)
 
@@ -311,9 +357,17 @@ class BronzeIngestionLog(Base):
 
 ## Bronze ingestion behavior (`src/violence_etl`)
 
+Artifact persistence is abstracted by environment: `DEV`/`TEST` use
+`LocalArtifactStorage` rooted at `ETL_BRONZE_DIR`, while `PROD` uses
+`BlobArtifactStorage` (`src/violence_etl/storage/blob_storage.py`) with
+low-level object storage access provided by `ObjectStorageClient`
+(`src/violence_etl/clients/object_storage.py`). In `PROD`, bronze landing/raw
+artifacts are blob names in `BRZECONTAINER` (`landing/<sha256>.csv`,
+`raw/yi5j-5fe9_<utcstamp>.csv`) and are stored/reported as those identifiers.
+
 Function `ingest_bronze(engine, settings, csv_path=None) -> dict`:
 
-1. If `csv_path` is None, download `settings.source_url` with `requests.get(..., allow_redirects=True, stream=True, timeout=120)` into memory, compute sha256, write landing file if absent, and write the run-stamped raw copy.
+1. If `csv_path` is None, download `settings.source_url` with `requests.get(..., allow_redirects=True, stream=True, timeout=120)` into memory, compute sha256, write the landing artifact if absent, and write the run-stamped raw copy via the active storage backend.
 2. Read the CSV with `pandas.read_csv(path, dtype=str, keep_default_na=False, quoting=csv.QUOTE_ALL)` so all fields stay text and empty strings stay empty strings (no NaN coercion).
 3. Assert the header equals the 7 expected names in order from `src/violence_etl`; raise `SchemaError` on mismatch (fail fast, no partial load).
 4. Idempotency: if `bronze_crimes_raw` already holds rows for this `source_sha256` and `--force` is not set, update the log row for that hash to `status="skipped"` and return `{"status": "skipped", ...}` without inserting raw rows.
@@ -470,7 +524,7 @@ Object mapping to the requirement:
 - c. total crimes by year, month, weekday and quarter -> `gold_crimes_by_calendar` (grain: year x quarter x month x weekday).
 - d. total crimes by electoral period -> `gold_crimes_by_electoral_period` (`period_order` uses post, intermediate, pre, electoral for stable presentation or calendar order, documented in README; `pct_of_total` is share of the grand total, rounded to 2 decimals).
 
-`src/violence_etl` exposes `build_gold(engine) -> dict`, which for each table: `DELETE` existing rows, run the aggregation with `pandas.groupby` or an `INSERT ... SELECT`, commit, and return row counts plus the grand total. Also optionally writes `data/gold/*.csv` exports controlled by a flag.
+`src/violence_etl` exposes `build_gold(engine, export_csv=False, export_dir="data/gold", settings=None) -> dict`, which for each table: `DELETE` existing rows, run the aggregation with `pandas.groupby` or an `INSERT ... SELECT`, commit, and return row counts plus the grand total. Optionally exports the four gold CSVs via the artifact storage backend: in `DEV`/`TEST` to local `export_dir`, in `PROD` to the `GOLDCONTAINER` root regardless of `export_dir`.
 
 Optional convenience: Alembic creates the four `gold_*` tables; the pipeline fills them. No gold views are required, but `README.md` documents the equivalent `SELECT` for each.
 
@@ -573,7 +627,7 @@ markers = [
 ]
 ```
 
-Current result on Python 3.14: 85 passed, 1 skipped.
+Current result on Python 3.14: 102 passed, 1 skipped.
 
 Fixtures in `tests/conftest.py`:
 - `clean_etl_env`: autouse, removes the ETL/PG env vars so defaults are deterministic.
