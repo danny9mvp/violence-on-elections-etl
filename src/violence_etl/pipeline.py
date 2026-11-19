@@ -6,9 +6,9 @@ from typing import Dict, Optional
 
 from sqlalchemy.engine import Engine
 
+from violence_etl.config.settings import Settings
 from violence_etl.transformations.bronze import ingest_bronze
 from violence_etl.transformations.gold import build_gold
-from violence_etl.config.settings import Settings
 from violence_etl.transformations.silver import build_silver
 
 logger = logging.getLogger(__name__)
@@ -47,7 +47,7 @@ def run_all(
     force: bool = False,
     export_csv: bool = False,
 ) -> Dict[str, Dict[str, object]]:
-    logger.info("pipeline: run-all start (backend=%s)", settings.backend)
+    logger.info("pipeline: run-all start (env=%s)", settings.env)
     bronze = run_bronze(engine, settings, csv_path=csv_path, force=force)
     silver = run_silver(engine, settings, sha=str(bronze.get("source_sha256") or "") or None, force=force)
     gold = run_gold(engine, export_csv=export_csv)

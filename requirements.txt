@@ -18,3 +18,7 @@ numpy==2.3.2; python_version >= "3.11"
 # HTTP, config, utils
 requests==2.31.0
 python-dotenv==1.0.1
+
+# Azure Key Vault (PostgreSQL credentials in PROD)
+azure-identity==1.17.1
+azure-keyvault-secrets==4.8.0

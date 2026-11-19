@@ -5,6 +5,7 @@ import os
 import pytest
 from sqlalchemy import func, select
 
+from violence_etl.config.settings import get_settings
 from violence_etl.db.connection import make_engine
 from violence_etl.db.models.bronze_crimes_raw import BronzeCrimesRaw
 from violence_etl.db.models.bronze_ingestion_log import BronzeIngestionLog
@@ -15,7 +16,6 @@ from violence_etl.db.models.gold_top_50_departments import GoldTop5Departments
 from violence_etl.db.models.silver_crimes import SilverCrimes
 from violence_etl.db.models.silver_rejected_rows import SilverRejectedRows
 from violence_etl.pipeline import run_all
-from violence_etl.config.settings import get_settings
 
 TABLES = [
     BronzeCrimesRaw,
@@ -40,7 +40,7 @@ def _all_counts(engine):
 
 def _integ_engine(tmp_path, monkeypatch):
     db_path = tmp_path / "integration.db"
-    monkeypatch.setenv("ETL_DB_BACKEND", "sqlite")
+    monkeypatch.setenv("ENV", "TEST")
     monkeypatch.setenv("ETL_SQLITE_PATH", str(db_path))
     monkeypatch.setenv("ETL_BRONZE_DIR", str(tmp_path / "bronze"))
     settings = get_settings()
@@ -141,8 +141,9 @@ def test_cli_init_db_and_run_all(tmp_path, monkeypatch, sample_csv, capsys):
     db_path = tmp_path / "cli.db"
     bronze_dir = tmp_path / "bronze"
     monkeypatch.setenv("ETL_BRONZE_DIR", str(bronze_dir))
+    monkeypatch.setenv("ENV", "TEST")
 
-    base = ["--backend", "sqlite", "--sqlite-path", str(db_path)]
+    base = ["--sqlite-path", str(db_path)]
     assert main(base + ["init-db"]) == 0
     assert main(base + ["run-all", "--csv-path", sample_csv]) == 0
     assert main(base + ["validate"]) == 0
@@ -157,7 +158,8 @@ def test_cli_drop_db_requires_yes(tmp_path, monkeypatch, sample_csv):
     from violence_etl.db.models.base_model import Base
 
     db_path = tmp_path / "cli2.db"
-    base = ["--backend", "sqlite", "--sqlite-path", str(db_path)]
+    monkeypatch.setenv("ENV", "TEST")
+    base = ["--sqlite-path", str(db_path)]
     assert main(base + ["init-db"]) == 0
     assert main(base + ["drop-db"]) == 2
     assert main(base + ["drop-db", "--yes"]) == 0
