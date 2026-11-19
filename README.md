@@ -90,10 +90,14 @@ requests==2.31.0
 python-dotenv==1.0.1
 azure-identity==1.17.1
 azure-keyvault-secrets==4.8.0
+azure-storage-blob==12.22.0
 ```
 
 `azure-identity` and `azure-keyvault-secrets` are used in `ENV=PROD` to fetch
-PostgreSQL credentials from Azure Key Vault. `requirements-dev.txt` adds
+PostgreSQL credentials and blob storage configuration from Azure Key Vault.
+`azure-storage-blob` is used in `ENV=PROD` for bronze and gold CSV artifact
+storage. Azure SDK imports are lazy, so `DEV`/`TEST` local flows do not require
+these packages at runtime. `requirements-dev.txt` adds
 `pytest`, `ruff`, `pytest-cov`, `coverage` and the Jupyter stack
 (`jupyterlab`, `notebook`, `ipykernel`). The coverage and Jupyter pins are
 split by interpreter range with the same markers.
@@ -122,21 +126,28 @@ gitignored). `.env.example` lists them.
 | `ETL_SOURCE_URL` | `http://www.datos.gov.co/api/v3/views/yi5j-5fe9/export.csv` | download source |
 | `ETL_LOG_LEVEL` | `INFO` | root log level |
 | `ETL_DEDUP_MODE` | `drop` | `drop` or `sum` duplicate policy |
-| `ETL_BRONZE_DIR` | `data/bronze` | landing/raw root |
+| `ETL_BRONZE_DIR` | `data/bronze` | local landing/raw root for `DEV`/`TEST` |
 
 Environment behavior:
 
 - `ENV=DEV` or `ENV=TEST`: the pipeline uses SQLite at `ETL_SQLITE_PATH`. This
   is the path for local development and automated tests.
-- `ENV=PROD`: the pipeline uses Azure PostgreSQL. Credentials are fetched from
-  Azure Key Vault at `AZURE_KEYVAULT_URL` using `DefaultAzureCredential`. The
-  Key Vault must contain the secrets `PGHOST`, `PGPORT`, `PGUSER`,
-  `PGPASSWORD`, and `PGDATABASE`. The PostgreSQL connection is created with
-  `sslmode=require`.
+- `ENV=PROD`: the pipeline uses Azure PostgreSQL and Azure Blob Storage for
+  CSV artifacts. Credentials and storage configuration are fetched from Azure
+  Key Vault at `AZURE_KEYVAULT_URL` using `DefaultAzureCredential`. The Key
+  Vault must contain the database secrets `PGHOST`, `PGPORT`, `PGUSER`,
+  `PGPASSWORD`, and `PGDATABASE`, and the blob storage secrets
+  `STORAGEACCOUNT`, `BRZECONTAINER`, `SILVCONTAINER`, and `GOLDCONTAINER`.
+  The PostgreSQL connection is created with `sslmode=require`. Bronze and gold
+  CSV artifacts are stored in blob containers (landing/raw in the bronze
+  container, gold exports in the gold container root). `SILVCONTAINER` is
+  retrieved and configured now as a reserved location for future silver CSV
+  artifacts. Local `data/` artifact paths apply to `DEV`/`TEST`.
 
 PostgreSQL credentials are not read from local environment variables and there
-is no `DATABASE_URL` override. This keeps production credentials in Key Vault
-only.
+is no `DATABASE_URL` override. Blob container names and storage account name
+for `PROD` are also resolved from Key Vault. This keeps production credentials
+and storage configuration in Key Vault only.
 
 Generic Key Vault reads live in `src/violence_etl/clients/key_vault.py` as
 `KeyVaultClient`. It works for any secret and imports the Azure SDK only when
@@ -167,10 +178,14 @@ Requirements:
 - The process must be able to authenticate with Azure using
   `DefaultAzureCredential` (for example via Azure CLI login, managed identity,
   or supported environment-based credentials).
-- The Key Vault must expose secrets named `PGHOST`, `PGPORT`, `PGUSER`,
-  `PGPASSWORD`, and `PGDATABASE`.
-- Network access to the Key Vault and the PostgreSQL server must be available.
-  The connection uses `postgresql+psycopg://...?...sslmode=require`.
+- The Key Vault must expose database secrets named `PGHOST`, `PGPORT`,
+  `PGUSER`, `PGPASSWORD`, and `PGDATABASE`, and blob storage secrets named
+  `STORAGEACCOUNT`, `BRZECONTAINER`, `SILVCONTAINER`, and `GOLDCONTAINER`.
+- Network access to the Key Vault, the PostgreSQL server, and the storage
+  account must be available. The database connection uses
+  `postgresql+psycopg://...?...sslmode=require` and blob access uses
+  `https://<STORAGEACCOUNT>.blob.core.windows.net` with
+  `DefaultAzureCredential`.
 
 `init-db` runs the migrations. The equivalent direct Alembic command, from the
 repository root with the same environment, is:
@@ -203,7 +218,7 @@ Commands and their flags:
 | Command | Flags | What it does |
 | --- | --- | --- |
 | `init-db` | none | run `alembic upgrade head` for the configured environment |
-| `download` | none | fetch the CSV to `data/bronze/landing` and print the sha256 |
+| `download` | none | fetch the CSV, persist the landing artifact, and print the sha256 and location |
 | `ingest-bronze` | `--csv-path PATH`, `--force` | load bronze only |
 | `build-silver` | `--sha SHA`, `--force` | build silver only |
 | `build-gold` | `--export-csv` | build gold only |
@@ -215,11 +230,15 @@ Notes:
 
 - Without `--csv-path`, `ingest-bronze` and `run-all` download
   `ETL_SOURCE_URL`. With it, they read that local file and still hash its bytes.
+  In `PROD`, the resulting bronze artifacts are written to blob storage.
 - `--force` on bronze reloads the raw rows; on silver it rebuilds the active
   snapshot. See the idempotency section.
 - `--sha` on `build-silver` picks a specific bronze snapshot; the default is the
   most recent snapshot in `bronze_crimes_raw`.
-- `build-gold --export-csv` writes `data/gold/*.csv` in addition to the tables.
+- `build-gold --export-csv` and `run-all --export-csv` write the four gold CSVs
+  in addition to the tables: to `data/gold/*.csv` in `DEV`/`TEST`, or to the
+  `GOLDCONTAINER` root in `PROD` (`export_dir` applies to local `DEV`/`TEST`
+  exports only).
 - `drop-db` refuses to run without `--yes` and returns exit code 2.
 
 ## Tables
@@ -227,13 +246,20 @@ Notes:
 A migrated database has nine tables: the eight application tables below plus
 the Alembic bookkeeping table `alembic_version`.
 
-Landing and raw artifacts on disk:
+Landing and raw artifacts:
 
-- `data/bronze/landing/<sha256>.csv`: the verbatim downloaded bytes, named by
-  content hash, never edited.
-- `data/bronze/raw/yi5j-5fe9_<utcstamp>.csv`: a run-stamped copy referenced by
-  the ingestion log.
-- `data/gold/*.csv`: optional exports written by `--export-csv`.
+- `DEV`/`TEST` (local): `data/bronze/landing/<sha256>.csv` stores the verbatim
+  downloaded bytes named by content hash, `data/bronze/raw/yi5j-5fe9_<utcstamp>.csv`
+  stores the run-stamped copy, and `data/gold/*.csv` stores optional exports
+  written by `--export-csv`.
+- `PROD` (blob): bronze landing and raw artifacts are stored in `BRZECONTAINER`
+  as `landing/<sha256>.csv` and `raw/yi5j-5fe9_<utcstamp>.csv`. When
+  `--export-csv` is used, gold files are written to the `GOLDCONTAINER` root
+  with the same filenames (`gold_top5_departments.csv`,
+  `gold_crimes_by_department.csv`, `gold_crimes_by_calendar.csv`,
+  `gold_crimes_by_electoral_period.csv`). In `PROD`, reported bronze artifact
+  locations (`source_file`, download landing location) are blob names within the
+  bronze container.
 
 Bronze tables:
 
@@ -415,7 +441,7 @@ python -m pytest tests/test_periods.py -q
 ```
 
 The suite runs fully offline against SQLite using the committed fixtures
-(`ENV=TEST` in test configuration). The current result is 85 passed and 1
+(`ENV=TEST` in test configuration). The current result is 102 passed and 1
 skipped. The skipped test is a slow, network-backed run against the real
 dataset; enable it with `ETL_FULL_DATASET=1`:
 
@@ -472,9 +498,11 @@ CLI commands shown above.
 - `init-db` or `run-all` fails in `PROD` with Azure auth errors: ensure
   `DefaultAzureCredential` can authenticate in the current environment and that
   the identity has permission to read secrets in the vault.
-- `init-db` or `run-all` fails in `PROD` with missing/empty secret errors:
-  verify the vault contains `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, and
-  `PGDATABASE`.
+- A command fails in `PROD` with missing/empty secret errors: verify the vault
+  contains `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE`,
+  `STORAGEACCOUNT`, `BRZECONTAINER`, `SILVCONTAINER`, and `GOLDCONTAINER`. Blob
+  storage secrets are validated when settings load in `PROD`, so missing or
+  empty values fail fast.
 - PostgreSQL connection errors in `PROD`: verify the host/database values from
   Key Vault, network/firewall rules, and that the server accepts TLS
   connections (`sslmode=require` is enforced).
@@ -489,10 +517,12 @@ CLI commands shown above.
 
 ## Known limitations
 
-- The production PostgreSQL path uses Azure Key Vault and `sslmode=require` and
-  requires Azure authentication and network access to the vault and database; it
-  has not been executed locally in this environment. Local runs and automated
-  tests use SQLite (`ENV=DEV|TEST`).
+- The production PostgreSQL path and Azure Blob artifact storage use Azure Key
+  Vault, `DefaultAzureCredential`, and `sslmode=require`, and require Azure
+  authentication and network access to the vault, database, and storage
+  account; they have not been executed locally in this environment. Local runs
+  and automated tests use SQLite and local `data/` artifacts
+  (`ENV=DEV|TEST`).
 - The code and dependency markers target Python 3.8 through 3.14, but only
   Python 3.14 has been executed locally. Versions 3.8 through 3.13 have not
   been run here.
