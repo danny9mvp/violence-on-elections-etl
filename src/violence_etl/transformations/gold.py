@@ -6,20 +6,21 @@ transaction so it always converges to the same content.
 from __future__ import annotations
 
 import logging
-import os
 import time
 from decimal import Decimal
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import pandas as pd
 from sqlalchemy import delete, select
 from sqlalchemy.engine import Engine
 
 import violence_etl.db.models.gold_crimes_by_calendar
+from violence_etl.config.settings import Settings, get_settings
 from violence_etl.db.models.gold_crimes_by_department import GoldCrimesByDepartment
 from violence_etl.db.models.gold_crimes_by_electoral_period import GoldCrimesByElectoralPeriod
 from violence_etl.db.models.gold_top_50_departments import GoldTop5Departments
 from violence_etl.db.models.silver_crimes import SilverCrimes
+from violence_etl.storage.factory import get_artifact_storage
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,7 @@ def build_gold(
     engine: Engine,
     export_csv: bool = False,
     export_dir: str = "data/gold",
+    settings: Optional[Settings] = None,
 ) -> Dict[str, object]:
     started = time.time()
     df = _read_silver_for_gold(engine)
@@ -135,7 +137,11 @@ def build_gold(
             )
 
     if export_csv:
-        _export_csv(export_dir, top5_records, dept_records, cal_records, period_records)
+        s = settings or get_settings()
+        storage = get_artifact_storage(s)
+        storage.export_gold_csvs(
+            export_dir, top5_records, dept_records, cal_records, period_records
+        )
 
     result = {
         "grand_total": grand_total,
@@ -156,16 +162,3 @@ def build_gold(
         result["elapsed_seconds"],
     )
     return result
-
-
-def _export_csv(export_dir, top5, dept, cal, period) -> None:
-    os.makedirs(export_dir, exist_ok=True)
-    pd.DataFrame(top5).to_csv(os.path.join(export_dir, "gold_top5_departments.csv"), index=False)
-    pd.DataFrame(dept).to_csv(
-        os.path.join(export_dir, "gold_crimes_by_department.csv"), index=False
-    )
-    pd.DataFrame(cal).to_csv(os.path.join(export_dir, "gold_crimes_by_calendar.csv"), index=False)
-    pd.DataFrame(period).to_csv(
-        os.path.join(export_dir, "gold_crimes_by_electoral_period.csv"), index=False
-    )
-    logger.info("gold: exported csv to %s", export_dir)
