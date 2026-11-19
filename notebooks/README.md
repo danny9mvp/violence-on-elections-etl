@@ -22,8 +22,8 @@ does not leak into the production environment. `README.md` has the same steps.
 ## Notes
 
 - Every notebook starts with a bootstrap cell that adds the project to
-  `sys.path` and sets `ETL_DB_BACKEND=sqlite`, so notebooks never touch
-  PostgreSQL by accident.
+  `sys.path` and sets `ENV=DEV`, so notebooks use the local SQLite database
+  and never touch PostgreSQL by accident.
 - Notebook 01 downloads the source dataset, so it needs network access.
 - Notebooks 02 and 03 need the SQLite database under `data/warehouse/` and the
   landing file produced by notebook 01 or by `python -m violence_etl.cli download`.

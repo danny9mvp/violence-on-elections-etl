@@ -13,24 +13,19 @@ from violence_etl.db.connection import make_engine
 from violence_etl.db.models.base_model import Base
 
 _ETL_ENV_KEYS = (
-    "ETL_DB_BACKEND",
+    "ENV",
+    "AZURE_KEYVAULT_URL",
     "ETL_SQLITE_PATH",
     "ETL_SOURCE_URL",
     "ETL_LOG_LEVEL",
     "ETL_DEDUP_MODE",
     "ETL_BRONZE_DIR",
-    "PGHOST",
-    "PGPORT",
-    "PGUSER",
-    "PGPASSWORD",
-    "PGDATABASE",
-    "DATABASE_URL",
 )
 
 
 @pytest.fixture(autouse=True)
 def clean_etl_env(monkeypatch):
-    """Remove ETL/PG env vars so defaults are deterministic in every test."""
+    """Remove ETL env vars so defaults are deterministic in every test."""
     for key in _ETL_ENV_KEYS:
         monkeypatch.delenv(key, raising=False)
     yield
@@ -51,7 +46,7 @@ def settings_sqlite(sqlite_engine, monkeypatch, tmp_path):
     """Settings pointed at the temp SQLite database and a temp bronze dir."""
     from violence_etl.config.settings import get_settings
 
-    monkeypatch.setenv("ETL_DB_BACKEND", "sqlite")
+    monkeypatch.setenv("ENV", "TEST")
     monkeypatch.setenv("ETL_SQLITE_PATH", str(tmp_path / "test.db"))
     monkeypatch.setenv("ETL_BRONZE_DIR", str(tmp_path / "bronze"))
     monkeypatch.setenv("ETL_DEDUP_MODE", "drop")
