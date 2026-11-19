@@ -138,6 +138,13 @@ PostgreSQL credentials are not read from local environment variables and there
 is no `DATABASE_URL` override. This keeps production credentials in Key Vault
 only.
 
+Generic Key Vault reads live in `src/violence_etl/clients/key_vault.py` as
+`KeyVaultClient`. It works for any secret and imports the Azure SDK only when
+needed. PostgreSQL specifics live in `src/violence_etl/config/settings.py`:
+`postgres_url_from_key_vault()` reads the five secrets, parses `PGPORT`, and
+builds the `postgresql+psycopg` URL with `sslmode=require`;
+`database_url_object()` calls it for `PROD`.
+
 The CLI global flags are `--sqlite-path PATH` (sets `ETL_SQLITE_PATH` for this
 run) and `--log-level LEVEL` (sets `ETL_LOG_LEVEL` for this run).
 
@@ -408,7 +415,7 @@ python -m pytest tests/test_periods.py -q
 ```
 
 The suite runs fully offline against SQLite using the committed fixtures
-(`ENV=TEST` in test configuration). The current result is 82 passed and 1
+(`ENV=TEST` in test configuration). The current result is 85 passed and 1
 skipped. The skipped test is a slow, network-backed run against the real
 dataset; enable it with `ETL_FULL_DATASET=1`:
 

@@ -67,7 +67,7 @@ def test_prod_fetches_postgres_url_from_key_vault(monkeypatch):
         )
 
     monkeypatch.setattr(
-        "violence_etl.config.keyvault.postgres_url_from_key_vault", fake_fetch
+        "violence_etl.config.settings.postgres_url_from_key_vault", fake_fetch
     )
     s = get_settings()
     assert s.env == "PROD"

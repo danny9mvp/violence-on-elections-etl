@@ -22,6 +22,12 @@ DEFAULT_SOURCE_URL = "http://www.datos.gov.co/api/v3/views/yi5j-5fe9/export.csv"
 DEFAULT_SQLITE_PATH = "data/warehouse/violence_staging.db"
 VALID_ENVS = ("DEV", "TEST", "PROD")
 
+_PGHOST = "PGHOST"
+_PGPORT = "PGPORT"
+_PGUSER = "PGUSER"
+_PGPASSWORD = "PGPASSWORD"
+_PGDATABASE = "PGDATABASE"
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -68,6 +74,36 @@ def get_settings() -> Settings:
     )
 
 
+def postgres_url_from_key_vault(vault_url: str) -> URL:
+    """Build the production PostgreSQL URL from secrets in ``vault_url``."""
+    if not vault_url:
+        raise ValueError("AZURE_KEYVAULT_URL is required when ENV=PROD")
+
+    from violence_etl.clients.key_vault import KeyVaultClient
+
+    client = KeyVaultClient(vault_url)
+    host = client.get_secret(_PGHOST)
+    port_raw = client.get_secret(_PGPORT)
+    user = client.get_secret(_PGUSER)
+    password = client.get_secret(_PGPASSWORD)
+    database = client.get_secret(_PGDATABASE)
+
+    try:
+        port = int(port_raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Key Vault secret {0} must be an integer".format(_PGPORT)) from exc
+
+    return URL.create(
+        "postgresql+psycopg",
+        username=user,
+        password=password,
+        host=host,
+        port=port,
+        database=database,
+        query={"sslmode": "require"},
+    )
+
+
 def database_url_object(settings: Optional[Settings] = None) -> URL:
     """Build a :class:`sqlalchemy.engine.URL` for the configured environment.
 
@@ -77,8 +113,6 @@ def database_url_object(settings: Optional[Settings] = None) -> URL:
     s = settings or get_settings()
     if s.is_sqlite:
         return URL.create("sqlite", database=s.sqlite_path)
-
-    from violence_etl.config.keyvault import postgres_url_from_key_vault
 
     return postgres_url_from_key_vault(s.key_vault_url or "")
 

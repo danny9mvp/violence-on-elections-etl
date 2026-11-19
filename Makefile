@@ -16,6 +16,9 @@ lint:
 init-db:
 	$(CLI) init-db
 
+drop-db:
+    $(CLI) drop-db
+
 run-all:
 	$(CLI) run-all
 

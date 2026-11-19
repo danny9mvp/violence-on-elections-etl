@@ -133,6 +133,9 @@ ViolenceOnElectionsEtl/
 │       ├── __init__.py
 │       ├── cli.py                 # argparse entry point
 │       ├── pipeline.py            # orchestration (run_bronze/silver/gold/run_all)
+│       ├── clients/
+│       │   ├── __init__.py
+│       │   └── key_vault.py       # generic KeyVaultClient secret reader
 │       ├── config/
 │       │   ├── __init__.py        # REPO_ROOT (repo root)
 │       │   ├── settings.py        # env-driven config
@@ -190,7 +193,7 @@ Where things live:
 - Curated table: `silver_crimes`.
 - Rejected rows: `silver_rejected_rows`.
 - Denormalized query objects: `gold_*` tables.
-- Code: `src/violence_etl/` (package modules under `config/`, `db/`, `db/models/`, `exceptions/`, `transformations/`, `utils/`).
+- Code: `src/violence_etl/` (package modules under `clients/`, `config/`, `db/`, `db/models/`, `exceptions/`, `transformations/`, `utils/`).
 - Migrations: `migrations/` (repo root), with `alembic.ini` at the repo root.
 - Tests: `tests/`.
 - Notebooks: `notebooks/`.
@@ -242,9 +245,15 @@ Design points:
   is no `DATABASE_URL` override. In `PROD`, `AZURE_KEYVAULT_URL` is required and
   credentials are fetched from Key Vault secrets `PGHOST`, `PGPORT`, `PGUSER`,
   `PGPASSWORD`, and `PGDATABASE` using `DefaultAzureCredential`.
-- `database_url_object()` returns a SQLite URL for `DEV`/`TEST`, or a
-  `postgresql+psycopg://` URL with `sslmode=require` for `PROD` (built from Key
-  Vault secrets). `database_url_display()` masks the password for logging.
+- Generic secret reads use `KeyVaultClient` in
+  `src/violence_etl/clients/key_vault.py`. It works for any secret, accepts an
+  injected credential or secret client, and imports the Azure SDK lazily, so
+  `DEV`/`TEST` and injected-client tests need no Azure packages.
+- `postgres_url_from_key_vault(vault_url)` in `settings.py` owns the PostgreSQL
+  secret names, parses `PGPORT` with `int()`, and builds the
+  `postgresql+psycopg://` URL with `sslmode=require`. `database_url_object()`
+  returns a SQLite URL for `DEV`/`TEST` and calls this helper for `PROD`.
+  `database_url_display()` masks the password for logging.
 - The CLI global flags `--sqlite-path` and `--log-level` are pushed into the
   environment before `get_settings()` is called, so the rest of the code path is
   unchanged.
@@ -564,7 +573,7 @@ markers = [
 ]
 ```
 
-Current result on Python 3.14: 82 passed, 1 skipped.
+Current result on Python 3.14: 85 passed, 1 skipped.
 
 Fixtures in `tests/conftest.py`:
 - `clean_etl_env`: autouse, removes the ETL/PG env vars so defaults are deterministic.
@@ -577,7 +586,8 @@ Fixtures in `tests/conftest.py`:
 Unit tests:
 - `test_periods.py`: the full 2003..2026 table asserted year by year; the reference cycle `{2013: pre-electoral, 2014: electoral, 2015: post-electoral, 2016: intermediate, 2017: pre-electoral}`; `2002 -> electoral`, `2026 -> electoral`, `2001 -> pre-electoral`; `2000 -> unclassified`; a non-4-year `ELECTION_YEARS` triggers `is_cycle_valid` False.
 - `test_schema.py`: exact expected header list, order, and case; mismatch raises `SchemaError`.
-- `test_settings.py`: defaults to `ENV=DEV` with SQLite; `DEV`/`TEST` build SQLite URLs; invalid `ENV` raises; `ENV=PROD` requires `AZURE_KEYVAULT_URL`; PROD fetches PostgreSQL credentials from Key Vault (monkeypatched) and returns a URL with `sslmode=require`; masked display URLs do not leak the password.
+- `test_settings.py`: defaults to `ENV=DEV` with SQLite; `DEV`/`TEST` build SQLite URLs; invalid `ENV` raises; `ENV=PROD` requires `AZURE_KEYVAULT_URL`; PROD fetches PostgreSQL credentials from Key Vault (monkeypatched at `violence_etl.config.settings.postgres_url_from_key_vault`) and returns a URL with `sslmode=require`; masked display URLs do not leak the password.
+- `test_key_vault_client.py`: `KeyVaultClient` reads non-empty secrets from an injected fake client; an injected credential avoids importing `azure.identity`; missing Azure packages raise a clear `ImportError`; empty or missing secret values raise `ValueError`; `postgres_url_from_key_vault()` builds the URL from fake secrets, rejects an empty vault URL and a non-integer `PGPORT`; `DEV`/`TEST` URL building does not import the Key Vault client.
 - `test_silver.py`: all R1..R13 rules individually; zero padding preserved on load (assert `cod_depto == "05"`, `cod_muni == "05660"`); date `31/08/2026` parses to `2026-08-31`; `11/12/2024` parses as 11 Dec not 12 Nov; exact-duplicate rows collapse (3 identical -> 1); `dedup_mode="sum"` sums instead; rejected rows land in `silver_rejected_rows` with the expected reason; `inserted_rows` tracks actual writes (second run is 0); a new snapshot purges the previous sha.
 - `test_bronze.py`: header validation; `keep_default_na=False` keeps empty strings as empty strings; content hash stable; re-ingest of the same sha skips and updates the single log row; `--force` reloads without growing the log.
 - `test_gold.py`: top 5 ordering and rank values on the sample; `gold_crimes_by_department` totals equal the silver total; `gold_crimes_by_calendar` grain uniqueness; `gold_crimes_by_electoral_period` `pct_of_total` sums to about 100; top-5 truncates when more than five departments exist; the period order matches the expected labels; `export_csv=True` writes all four files.
