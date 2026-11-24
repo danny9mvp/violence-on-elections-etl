@@ -1,0 +1,39 @@
+# Local DEV compose workflow for the Violence on Elections ETL.
+# Default command (from image): init-db && run-all
+# Examples:
+#   docker compose run --rm etl
+#   docker compose run --rm etl python -m violence_etl.cli validate
+#   docker compose run --rm etl sh -c "python -m violence_etl.cli init-db && python -m violence_etl.cli run-all --export-csv"
+#
+# Linux bind-mount permissions:
+# - The image runs as a non-root user (uid/gid 10001 by default).
+# - Bind mounts inherit host directory ownership; if ./data is not writable by the
+#   container user, runs may fail when writing SQLite/bronze/gold artifacts.
+# - To match your host user, set ETL_UID/ETL_GID (for example: ETL_UID=$(id -u) ETL_GID=$(id -g)).
+# - Alternatively, pre-create and chown ./data to the container user, or use a named
+#   volume instead of ./data:/app/data (see commented example below).
+# TODO(item 2): make first-run bind-mount guidance more explicit for Linux
+# (e.g. `mkdir -p data`, `ETL_UID=$(id -u) ETL_GID=$(id -g)` or chown, and when to prefer a named volume);
+# custom UID/GID mapping alone may fail if mounted host dir is not writable. See docs/PLAN.md TODOs.
+
+services:
+  etl:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: violence-etl:dev
+    user: "${ETL_UID:-10001}:${ETL_GID:-10001}"
+    environment:
+      ENV: ${ENV:-DEV}
+      ETL_SQLITE_PATH: ${ETL_SQLITE_PATH:-/app/data/warehouse/violence_staging.db}
+      ETL_BRONZE_DIR: ${ETL_BRONZE_DIR:-/app/data/bronze}
+      ETL_SOURCE_URL: ${ETL_SOURCE_URL:-http://www.datos.gov.co/api/v3/views/yi5j-5fe9/export.csv}
+      ETL_LOG_LEVEL: ${ETL_LOG_LEVEL:-INFO}
+      ETL_DEDUP_MODE: ${ETL_DEDUP_MODE:-drop}
+    volumes:
+      - ./data:/app/data
+      # Named volume alternative (avoids host bind-mount UID/GID issues):
+      # - etl-data:/app/data
+
+# volumes:
+#   etl-data:
