@@ -35,7 +35,8 @@ does not leak into the production environment. `README.md` has the same steps.
 - `01_bronze_profiling.ipynb`: download or reuse the landing file, profile the
   raw CSV, and confirm the planning facts and the mirrored bronze table.
 - `02_silver_validation.ipynb`: build silver, show the deduplication effect
-  (15,696 to 14,212), the rejected-row breakdown, and the electoral-period
-  distribution per year.
+  (15,981 raw rows to 14,460 silver rows, 1,521 duplicates removed in the latest
+  validated snapshot), the rejected-row breakdown, and the electoral-period
+  distribution per year. Counts can change as the source snapshot updates.
 - `03_gold_analysis.ipynb`: build and query the four `gold_*` tables, including
   the top 5 departments and the crimes-by-electoral-period share.
