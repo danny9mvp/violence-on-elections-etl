@@ -1,0 +1,67 @@
+# VCS
+.git
+.gitignore
+.gitattributes
+
+# Python environments and caches
+.venv
+venv
+env
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.tox/
+.nox/
+.coverage
+coverage.xml
+htmlcov/
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# IDE/editor
+.idea/
+.vscode/
+*.iml
+out/
+
+# Secrets and local env files
+.env
+.env.*
+*.pem
+*.key
+*.crt
+
+# Local data artifacts and databases (DEV/TEST persistence is mounted at runtime)
+data/
+*.db
+*.sqlite
+*.sqlite3
+
+# Notebooks, tests, docs, specs, and other non-runtime content
+notebooks/
+.ipynb_checkpoints/
+.jupyter/
+tests/
+docs/
+specs/
+README.md
+Makefile
+pyproject.toml
+requirements-dev.txt
+
+# Container/build metadata not needed in image
+# TODO(item 3): reconsider excluding Dockerfile/docker-compose.yml here if build context or reproducibility needs change (harmless now).
+Dockerfile
+.dockerignore
+docker-compose.yml
+
+# Agent/tooling and OS files
+.opencode/
+.DS_Store
+*.log

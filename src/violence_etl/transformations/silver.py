@@ -19,12 +19,12 @@ import pandas as pd
 from sqlalchemy import delete, func, select
 from sqlalchemy.engine import Engine
 
-from violence_etl.transformations.bronze import latest_loaded_sha, read_bronze_frame
-from violence_etl.exceptions.load_exception import LoadException
+from violence_etl.config.settings import Settings
 from violence_etl.db.models.silver_crimes import SilverCrimes
 from violence_etl.db.models.silver_rejected_rows import SilverRejectedRows
+from violence_etl.exceptions.load_exception import LoadException
+from violence_etl.transformations.bronze import latest_loaded_sha, read_bronze_frame
 from violence_etl.utils.periods import electoral_period
-from violence_etl.config.settings import Settings
 from violence_etl.utils.timeutil import naive_utc_now
 
 logger = logging.getLogger(__name__)

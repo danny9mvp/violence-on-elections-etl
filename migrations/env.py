@@ -5,8 +5,8 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import create_engine, pool
 
-from violence_etl.db.models.base_model import Base
 from violence_etl.config.settings import database_url_object, get_settings
+from violence_etl.db.models.base_model import Base
 
 config = context.config
 

@@ -28,21 +28,21 @@ PYTHONPATH=src ENV=DEV .venv/bin/python -m violence_etl.cli validate
 `ENV` defaults to `DEV`, so `ENV=DEV` can be omitted for local runs. The
 package lives under `src/` (no editable install step is configured), so run
 CLI commands from the repository root with `PYTHONPATH=src`. The first
-`run-all` downloads the source and needs network access. Expected tail of the
-first run:
+`run-all` downloads the source and needs network access. Expected tail of a
+fresh first run on the latest validated snapshot (local DEV, Docker, 2026-11-20):
 
 ```
-run-all: bronze_status=loaded raw_rows=15696 silver_rows=14212 rejected=0 dropped_duplicates=1484 total_crimes=14212 gold_grand_total=14212
+run-all: bronze_status=loaded raw_rows=15981 silver_rows=14460 rejected=0 dropped_duplicates=1521 total_crimes=15981 gold_grand_total=15981
 ```
 
-Expected `validate`:
+Expected `validate` for that snapshot:
 
 ```
-[ok] bronze rows: 15696
-[ok] silver rows: 14212
+[ok] bronze rows: 15981
+[ok] silver rows: 14460
 [ok] rejected rows: 0
-[ok] silver total == gold dept total: (14212, 14212)
-[ok] gold dept total == gold period total: (14212, 14212)
+[ok] silver total == gold dept total: (15981, 15981)
+[ok] gold dept total == gold period total: (15981, 15981)
 [ok] top5 has 5 rows: 5
 [ok] by-department rows: 32
 [ok] period table has 4 rows: 4
@@ -56,11 +56,78 @@ The pipeline is idempotent. A second `run-all` on the same source skips bronze
 and changes no row counts in any table:
 
 ```
-run-all: bronze_status=skipped raw_rows=15696 silver_rows=14212 rejected=0 dropped_duplicates=1484 total_crimes=14212 gold_grand_total=14212
+run-all: bronze_status=skipped raw_rows=15981 silver_rows=14460 rejected=0 dropped_duplicates=1521 total_crimes=15981 gold_grand_total=15981
 ```
 
 The corresponding `silver:` log line on that second run reports `inserted=0`,
 because the insert rowcount is zero when every business key already exists.
+
+## Docker (local DEV)
+
+The repository includes a runtime-only image (`python:3.12.12-slim`, pinned) and
+`docker-compose.yml` for local runs. The image copies `src/`, `migrations/`,
+`alembic.ini`, and `requirements.txt`, sets `PYTHONPATH=/app/src` and
+`PYTHONUNBUFFERED=1`, and runs as a non-root user.
+
+Build the image:
+
+```
+docker build -t violence-etl:dev .
+```
+
+Default container command behavior:
+
+```
+python -m violence_etl.cli init-db && python -m violence_etl.cli run-all
+```
+
+`init-db` runs Alembic migrations to head and is idempotent/non-destructive.
+`--export-csv` is off by default and only runs when explicitly passed.
+
+Local compose usage (SQLite with mounted persistence under `/app/data`):
+
+```
+docker compose run --rm etl
+docker compose run --rm etl python -m violence_etl.cli validate
+```
+
+Override examples (overrides replace the whole default command chain):
+
+```
+# default chain with gold CSV export
+docker compose run --rm etl sh -c "python -m violence_etl.cli init-db && python -m violence_etl.cli run-all --export-csv"
+
+# validation only (no implicit init-db)
+docker compose run --rm etl python -m violence_etl.cli validate
+
+# targeted/local-input run (mount input under ./data, include init-db when needed)
+docker compose run --rm etl sh -c "python -m violence_etl.cli init-db && python -m violence_etl.cli ingest-bronze --csv-path /app/data/input.csv"
+```
+
+Because overrides replace the whole chained default, maintenance/targeted
+commands do not implicitly include `init-db` unless included in the override.
+
+The default compose mount is `./data:/app/data`, which persists the SQLite
+database and local bronze/gold artifacts across runs. On Linux, bind mounts can
+inherit host ownership that is not writable by the container user
+(default uid/gid 10001). Use `ETL_UID`/`ETL_GID` (for example
+`ETL_UID=$(id -u) ETL_GID=$(id -g) docker compose run --rm etl`), pre-create and
+chown `./data`, or switch to a named volume as shown in `docker-compose.yml`.
+Local `data/` persistence is a DEV/TEST concern.
+
+## Azure Container Apps Job (PROD)
+
+The same image is intended to run as a monthly run-to-completion Azure Container
+Apps Job. Use the default command unless an explicit operational override is
+required. Configure `ENV=PROD` and `AZURE_KEYVAULT_URL`; the application uses
+`DefaultAzureCredential`/managed identity to read PostgreSQL and blob storage
+configuration from Key Vault and to access Azure PostgreSQL and Azure Blob
+Storage (existing behavior, with `sslmode=require` for PostgreSQL). No data
+volume is required or expected in PROD because artifact persistence uses Blob
+Storage and the container filesystem is ephemeral. Missing required PROD
+configuration/secrets, auth failures, or unreachable dependencies fail fast and
+surface as job failure (non-zero exit). Do not bake secrets or local data into
+the image. Pass runtime configuration and identities through the job/platform.
 
 ## Stack and compatibility
 
@@ -373,14 +440,16 @@ because `departamento` and `municipio` are functionally dependent on the codes.
 
 The default policy is `drop`, which keeps one row per business key. Repeated
 identical rows are treated as ingestion duplication, not distinct events,
-because the source has no event id and `CANTIDAD` is always 1. On the verified
-dataset this removes 1,484 exact duplicates: 15,696 raw rows become 14,212
-silver rows and the crime total goes from 15,696 to 14,212.
+because the source has no event id. Counts change as the source snapshot
+updates; on the latest validated snapshot (local DEV, Docker, 2026-11-20) this
+removed 1,521 exact duplicate rows (9.52 percent): 15,981 raw rows became
+14,460 silver rows, with `rejected=0`, `total_crimes=15981`, and
+`gold_grand_total=15981`.
 
 `ETL_DEDUP_MODE=sum` groups by the key without `cantidad` and sums `CANTIDAD`.
-On this dataset it keeps 14,212 rows and a total of 15,696, because every
-duplicate group sums back to its own count. It is intended for datasets where
-`CANTIDAD` is a real magnitude and duplicate rows are partial reports.
+It is intended for datasets where `CANTIDAD` is a real magnitude and duplicate
+rows are partial reports. Row and total counts under `sum` depend on the source
+snapshot; verify by running with `ETL_DEDUP_MODE=sum`.
 
 ## Electoral period mapping
 
@@ -492,7 +561,7 @@ CLI commands shown above.
   example, `PYTHONPATH=src python -m violence_etl.cli ...`), or install the
   project in editable mode once packaging is configured. Do not run
   `python -m src.violence_etl.cli`, because internal imports use the
-  `violence_etl.*` package name.
+  `violence_etl.*` package name. See TODO items 4-5 in `docs/PLAN.md`.
 - `AZURE_KEYVAULT_URL is required when ENV=PROD`: set `AZURE_KEYVAULT_URL` to
   the vault URL (for example `https://violencekv.vault.azure.net/`).
 - `init-db` or `run-all` fails in `PROD` with Azure auth errors: ensure
@@ -514,6 +583,7 @@ CLI commands shown above.
   the kernel is using the project `.venv`, and confirm the notebook can resolve
   the `violence_etl` package in your environment. If imports still fail, check
   that ORM models import `Base` from `violence_etl.db.models.base_model`.
+- Docker/compose Linux bind-mount permissions and other follow-ups are tracked in `docs/PLAN.md` (`## TODOs and follow-ups`).
 
 ## Known limitations
 

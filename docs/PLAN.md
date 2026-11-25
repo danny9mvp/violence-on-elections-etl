@@ -7,19 +7,19 @@ reference, the table catalogue and day-to-day usage, see `README.md`.
 
 Source: `http://www.datos.gov.co/api/v3/views/yi5j-5fe9/export.csv` (Socrata export, follows a 301 redirect; must use `requests` with `allow_redirects=True` or curl `-L`).
 
-Facts confirmed by direct inspection of the downloaded file during planning:
+Facts confirmed by direct inspection of the downloaded file during planning. Row, duplicate, and total counts are snapshot dependent and reflect the latest validated run (local DEV, Docker, 2026-11-20) unless noted; file size, date range, zone distribution, and department/municipality counts below are from the planning inspection and were not re-derived from that run.
 
-- Plain CSV, comma separated, every field quoted, 976,021 bytes.
+- Plain CSV, comma separated, every field quoted, 976,021 bytes (planning inspection).
 - Header exactly: `"FECHA HECHO","COD_DEPTO","DEPARTAMENTO","COD_MUNI","MUNICIPIO","ZONA","CANTIDAD"`.
-- 15,696 data rows.
+- 15,981 data rows (latest validated snapshot; 15,696 at planning inspection).
 - `FECHA HECHO` is `DD/MM/YYYY`, not ISO.
 - `COD_DEPTO` is always 2 chars, `COD_MUNI` is always 5 chars, both zero padded, must stay text.
-- `ZONA` values: `URBANA` (9,813) and `RURAL` (5,883).
-- `CANTIDAD` is always the literal `1` in every row.
-- 32 distinct departments, 777 distinct municipality codes.
-- Date range min `2003-01-01`, max `2026-08-31`; rows arrive in descending date order.
-- 14,212 distinct full rows; 1,484 rows are exact duplicates (largest duplicate group has 24 copies). Total `CANTIDAD` over all rows is 15,696; over deduplicated rows it is 14,212.
-- No empty cells in the sample. Nulls and unparseable dates are still validated by design.
+- `ZONA` values observed during planning: `URBANA` (9,813) and `RURAL` (5,883).
+- `CANTIDAD` was always the literal `1` in every row during planning inspection.
+- 32 distinct departments, 777 distinct municipality codes (planning inspection).
+- Date range min `2003-01-01`, max `2026-08-31` during planning inspection; rows arrive in descending date order.
+- 14,460 distinct business rows in silver with `ETL_DEDUP_MODE=drop`; 1,521 rows removed as exact duplicates in the latest validated snapshot (largest duplicate group was 24 copies at planning inspection). Raw rows 15,981, silver rows 14,460, rejected 0, `total_crimes` 15,981, `gold_grand_total` 15,981.
+- No empty cells in the planning sample. Nulls and unparseable dates are still validated by design.
 
 ## Target runtime and dependency strategy (Python 3.8 to 3.14)
 
@@ -47,6 +47,29 @@ invalid values fail fast at startup. Runtime dependencies include
 `azure-identity`, `azure-keyvault-secrets`, and `azure-storage-blob`; Azure SDK
 imports are lazy so local development and automated tests use SQLite and local
 `data/` artifacts (`ENV=DEV|TEST`) without requiring Azure packages at runtime.
+
+## Containerized execution model
+
+A runtime-only Docker image (`python:3.12.12-slim`, pinned) packages `src/`,
+`migrations/`, `alembic.ini`, and `requirements.txt`, sets `PYTHONPATH=/app/src`
+and `PYTHONUNBUFFERED=1`, runs as a non-root user, and defaults to
+`python -m violence_etl.cli init-db && python -m violence_etl.cli run-all`.
+Command overrides replace the whole chain, so maintenance commands must include
+`init-db` explicitly when needed.
+
+For local DEV (`docker-compose.yml`, `ENV=DEV`), SQLite and local bronze/gold
+artifacts persist via a mounted data path under `/app/data` (default
+`./data:/app/data`). Linux bind mounts may require host ownership alignment,
+configurable UID/GID mapping, or a named volume. Local `data/` persistence is a
+DEV/TEST concern.
+
+For PROD, the same image is intended to run as a monthly run-to-completion
+Azure Container Apps Job with `ENV=PROD` and `AZURE_KEYVAULT_URL`, using
+`DefaultAzureCredential`/managed identity with existing Key Vault, PostgreSQL,
+and Blob Storage integrations. No data volume is required or expected in PROD;
+missing required configuration/secrets, auth failures, or unreachable
+dependencies should fail fast and surface as job failure. See `README.md` for
+build/run examples and override behavior.
 
 ## requirements.txt (runtime, pinned, with markers)
 
@@ -391,9 +414,9 @@ R6. `zona`: keep only `URBANA` / `RURAL`; anything else is rejected (R10).
 R7. Null check on `fecha_hecho`, `cod_depto`, `departamento`, `cod_muni`, `municipio`, `zona`, `cantidad`. Any null is rejected (R10). Empty string counts as null.
 R8. Referential sanity: `cod_depto` must equal the first 2 characters of `cod_muni`; if not, reject with reason `depto_muni_mismatch`.
 R9. Deduplication. Chosen rule, deliberate: drop exact duplicate business rows, keeping the first occurrence, keyed on `(fecha_hecho, cod_depto, cod_muni, zona, cantidad)`. `departamento` and `municipio` are functionally dependent on the codes, so they are not part of the key. Configurable via `ETL_DEDUP_MODE`:
-    - `drop` (default): keep one row per key. Effect on the verified dataset: 15,696 raw rows to 14,212 silver rows, removing 1,484 exact duplicates (9.45 percent). Crime total (sum of `CANTIDAD`) goes from 15,696 to 14,212.
-    - `sum`: group by the same key and sum `CANTIDAD`. On this dataset it would reproduce 15,696 because every duplicate group sums back to its own count, so the total is preserved but rows collapse to 14,212. Provided for datasets where `CANTIDAD` is a real magnitude and duplicates are partial reports.
-    The default `drop` treats repeated identical rows as ingestion duplication, not distinct events, because there is no event id in the source and `CANTIDAD` is always 1.
+    - `drop` (default): keep one row per key. Effect on the latest validated snapshot (local DEV, Docker, 2026-11-20): 15,981 raw rows to 14,460 silver rows, removing 1,521 exact duplicates (9.52 percent), with `rejected=0`, `total_crimes=15981`, and `gold_grand_total=15981`. Snapshot counts can change as the source updates.
+    - `sum`: group by the key without `cantidad` and sum `CANTIDAD`. Provided for datasets where `CANTIDAD` is a real magnitude and duplicate rows are partial reports. Row and total counts under `sum` depend on the source snapshot; verify by running with `ETL_DEDUP_MODE=sum`.
+    The default `drop` treats repeated identical rows as ingestion duplication, not distinct events, because the source has no event id. At planning inspection `CANTIDAD` was always `1`.
 R10. Every rejected row is copied (raw values plus a `reject_reason`) to `silver_rejected_rows` in the same transaction, so nothing is silently lost.
 R11. Calendar derivation from `fecha_hecho`: `year`, `month` (1-12), `quarter` (1-4 from `(month-1)//3+1`), `weekday_num` (ISO 1=Monday .. 7=Sunday via `dt.weekday()+1`), `weekday_name` (`Monday`..`Sunday`).
 R12. Electoral period assignment via `src/violence_etl` (next section).
@@ -660,7 +683,7 @@ Exact commands are in `README.md`.
 Notebooks use the PyCharm IDE managed Jupyter server (Project Settings > Python Interpreter > Jupyter: let PyCharm start/manage the server; the kernel is the project `.venv`). No separate `jupyter notebook` process is required. The notebook stack lives in `requirements-dev.txt`. Commit the `.ipynb` files; `.ipynb_checkpoints/` and `.jupyter/` are gitignored.
 
 - `notebooks/01_bronze_profiling.ipynb`: download or open the landing file, profile the raw CSV (row count, nulls, dtypes, value counts for `ZONA`, duplicate groups, date range), confirm the planning facts, and show the raw table after `ingest-bronze`.
-- `notebooks/02_silver_validation.ipynb`: run `build-silver` against SQLite, show before/after row counts, the dedup effect (15,696 to 14,212, total crimes 15,696 to 14,212), the rejected-rows breakdown, and the electoral-period distribution per year using the mapping table.
+- `notebooks/02_silver_validation.ipynb`: run `build-silver` against SQLite, show before/after row counts, the dedup effect for the latest validated snapshot (15,981 raw rows to 14,460 silver rows, 1,521 duplicates removed, `total_crimes` 15,981), the rejected-rows breakdown, and the electoral-period distribution per year using the mapping table. Counts can change as the source snapshot updates.
 - `notebooks/03_gold_analysis.ipynb`: query the four `gold_*` tables, render the top 5 departments, the by-department ranking, the calendar heat-style tables, and the crimes-by-electoral-period share, as a template that the README links to.
 
 Each notebook starts with a bootstrap cell that inserts the repo root on `sys.path` and sets `ENV=DEV` so notebooks use the local SQLite database and never touch PostgreSQL by accident.
@@ -736,13 +759,63 @@ Run `make lint` (ruff, configured in `pyproject.toml`) and `python -m pytest tes
 
 1. `python -m pytest tests -q` passes on Python 3.8 and on Python 3.14.
 2. `PYTHONPATH=src python -m violence_etl.cli init-db` followed by `run-all` completes against SQLite (`ENV=DEV|TEST`) and against Azure PostgreSQL (`ENV=PROD` with `AZURE_KEYVAULT_URL` and Key Vault credentials) without code changes, only via environment configuration.
-3. `bronze_crimes_raw` holds exactly 15,696 rows for the verified source sha, every source field text, plus `source_url`, `load_ts`, `source_file`.
-4. `silver_crimes` holds 14,212 rows with `ETL_DEDUP_MODE=drop`, and the removed count is 1,484. Changing to `sum` yields 14,212 rows and a total of 15,696. The chosen default and its effect are documented in `README.md`.
+3. For the latest validated snapshot (local DEV, Docker, 2026-11-20), `bronze_crimes_raw` holds 15,981 rows for the source sha, every source field text, plus `source_url`, `load_ts`, `source_file`. Row counts can change as the source updates.
+4. For the latest validated snapshot with `ETL_DEDUP_MODE=drop`, `silver_crimes` holds 14,460 rows, 1,521 duplicates are removed, and the run reports `rejected=0`, `total_crimes=15981`, `gold_grand_total=15981`. The chosen default and its effect are documented in `README.md`. Counts under `drop` and `sum` depend on the source snapshot.
 5. Zero unmapped years: every `year` in 2003..2026 has a non-null `electoral_period`, and the mapper matches the 24-row table exactly.
 6. `cod_depto` and `cod_muni` are never numeric: `SELECT cod_depto FROM silver_crimes LIMIT 1` returns a 2-char zero-padded string and `cod_muni` a 5-char one.
 7. Re-running `run-all` twice changes no table row counts (idempotent).
 8. Gold tables exist with the specified columns and keys: `gold_top5_departments` has 5 rows with ranks 1..5; `gold_crimes_by_department` has 32 rows; `gold_crimes_by_calendar` is unique on `(year, quarter, month, weekday_num)`; `gold_crimes_by_electoral_period` has 4 rows and `SUM(pct_of_total)` is 100.00 plus or minus rounding.
-9. Grand totals agree: sum of `gold_crimes_by_department.total_crimes` equals sum of `gold_crimes_by_electoral_period.total_crimes` equals `SELECT SUM(cantidad) FROM silver_crimes` equals 14,212 under the default policy.
+9. Grand totals agree: sum of `gold_crimes_by_department.total_crimes` equals sum of `gold_crimes_by_electoral_period.total_crimes` equals `SELECT SUM(cantidad) FROM silver_crimes` equals the run `gold_grand_total` (15,981 for the latest validated snapshot under the default policy).
 10. Row-level rejects are visible in `silver_rejected_rows` with a reason; nothing is silently dropped.
 11. `.gitignore` excludes `*.db`, `*.sqlite`, `.venv/`, `.idea/`, `.env`, and data artifacts; none of these are tracked.
 12. All changes are on branch `feat/etl-pipeline`, committed in the order above with semantic prefixes.
+
+## TODOs and follow-ups
+
+This section records outstanding issues and backlog follow-ups from containerization and general project review. Items are not implemented here; they should be handled in future work (and specs updated via `@analyst`/orchestrator when required).
+
+1. Dockerfile persisted data permissions (medium, `Dockerfile` around lines 22-23, `chmod -R a+rwx /app/data` after chown).
+   Context: permissions are overly broad (world-writable) for persisted data dirs.
+   Affected areas: `Dockerfile`, container runtime behavior for local bind mounts/named volumes.
+   Follow-up: tighten to least privilege while preserving bind-mount/UID-GID workaround (for example narrower mode/group/setgid strategy, rely on documented `ETL_UID/GID` mapping, host chown/prep, or named volume; consider runtime ownership handling only if justified). Validation showed custom `ETL_UID=20001 ETL_GID=20001` on a fresh host dir can still fail if the host dir is not writable, so image chmod alone is insufficient.
+
+2. First-run bind-mount permission guidance for Linux (medium, `docker-compose.yml` comments and `README.md` Docker/compose section).
+   Context: custom UID/GID mapping alone may fail if the mounted host directory is not writable by that mapping.
+   Affected areas: `docker-compose.yml`, `README.md`, developer onboarding for local DEV compose runs.
+   Follow-up: make guidance more explicit (for example `mkdir -p data`, `ETL_UID=$(id -u) ETL_GID=$(id -g)` or chown, and when to prefer a named volume).
+
+3. Docker reproducibility and build-context hygiene (low/nice-to-have, `Dockerfile` and `.dockerignore`).
+   Context: current image/build setup works but has reproducibility and context trade-offs.
+   Affected areas: `Dockerfile`, `.dockerignore`, CI/image build behavior.
+   Follow-up: consider pinning base image by immutable digest (currently `python:3.12.12-slim` tag pinned), consider pinning/removing `pip install --upgrade pip` for stricter reproducibility, and optionally reconsider excluding `Dockerfile`/`docker-compose.yml` in `.dockerignore` (harmless now).
+
+4. PYTHONPATH/src-layout package resolution (backlog).
+   Context: running from IDE/CLI currently requires `PYTHONPATH=src` (for example `PYTHONPATH=src python -m violence_etl.cli init-db/run-[bronze|silver|gold|all]/drop-db`). Users should not need to set environment variables only to locate the package/runtime.
+   Affected areas: project layout and packaging metadata (`pyproject.toml`/package discovery), CLI/docs/notebooks/dev workflows, possibly CI and tooling config.
+   Follow-up: evaluate editable install/packaging or layout adjustment so `violence_etl` resolves without manual `PYTHONPATH`.
+
+5. Makefile commands broken with current layout (backlog).
+   Context: for example `make test` fails with `ModuleNotFoundError: No module named 'violence_etl'` (`from violence_etl.db.connection import make_engine`).
+   Affected areas: `Makefile` targets (`test`, `lint`, `init-db`, `run-all`, `sqlite-run`, `drop-db`), package resolution/setup, developer docs.
+   Follow-up: align Makefile targets with package resolution (PYTHONPATH or install) and existing CLI usage.
+
+6. Lint baseline and import ordering (resolved).
+   Context: `make lint` previously reported 28 existing ruff errors, mostly unsorted import blocks and missing trailing newlines.
+   Affected areas: codebase-wide Python modules, `pyproject.toml`/ruff-isort configuration, CI/dev lint workflow.
+   Resolution: fixed the import ordering/newline issues with `ruff check . --fix`, confirmed `ruff check .` passes cleanly, and kept behavior unchanged (test suite still passing).
+
+7. Dependency footprint review (backlog).
+   Context: runtime and dev dependency sets should stay lean without breaking PROD/DEV workflows.
+   Affected areas: `requirements.txt`, `requirements-dev.txt`, runtime image size/build time, Azure runtime deps, dev-only tools, notebook stack separation, markers/pins.
+   Follow-up: review for unnecessary dependencies and adjust grouping/pins/markers while preserving supported Python range and PROD/DEV behavior.
+
+8. Rename `src/violence_etl/storage/factory.py` to `storage_factory` (backlog, refactor).
+   Context: module naming should better reflect purpose and be consistent with intended structure.
+   Affected areas: `src/violence_etl/storage/factory.py`, all imports/references in code, tests, docs, and specs as applicable in the implementation task.
+   Follow-up: perform coordinated rename and update references without behavior changes (tracked for implementation task/spec alignment).
+
+9. Column naming standardization across layers (backlog, coordinated schema/contract refactor).
+   Context: Spanish/English mix in core fields creates inconsistency across storage, code, and outputs.
+   Affected areas: bronze/silver/gold tables and related layers (models, migrations, transformations, validations, storage/export schemas, CLI/output, tests, notebooks, docs).
+   Proposed mapping: `fecha_hecho -> crime_date`, `cod_depto -> department_id`, `departamento -> department`, `cod_muni -> municipality_id`, `municipio -> municipality`, `zona -> zone`, `cantidad -> crime_count` (recommended; alternatives considered: `count`, `quantity`, `num_crimes` for clearer domain meaning).
+   Follow-up: design and execute a coordinated schema/contract refactor and migration plan (future spec), including compatibility and data migration considerations.
