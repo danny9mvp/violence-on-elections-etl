@@ -799,10 +799,10 @@ This section records outstanding issues and backlog follow-ups from containeriza
    Affected areas: `Makefile` targets (`test`, `lint`, `init-db`, `run-all`, `sqlite-run`, `drop-db`), package resolution/setup, developer docs.
    Follow-up: align Makefile targets with package resolution (PYTHONPATH or install) and existing CLI usage.
 
-6. Lint baseline and import ordering (backlog).
-   Context: `make lint` reports 28 errors, most of them unsorted import blocks.
+6. Lint baseline and import ordering (resolved).
+   Context: `make lint` previously reported 28 existing ruff errors, mostly unsorted import blocks and missing trailing newlines.
    Affected areas: codebase-wide Python modules, `pyproject.toml`/ruff-isort configuration, CI/dev lint workflow.
-   Follow-up: fix lint issues and/or align ruff/isort configuration and codebase formatting as appropriate.
+   Resolution: fixed the import ordering/newline issues with `ruff check . --fix`, confirmed `ruff check .` passes cleanly, and kept behavior unchanged (test suite still passing).
 
 7. Dependency footprint review (backlog).
    Context: runtime and dev dependency sets should stay lean without breaking PROD/DEV workflows.
