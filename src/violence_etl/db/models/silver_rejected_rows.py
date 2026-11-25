@@ -1,5 +1,7 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime
+from sqlalchemy import Column, DateTime, Integer, String, Text
+
 from violence_etl.db.models.base_model import Base
+
 
 class SilverRejectedRows(Base):
     __tablename__ = "silver_rejected_rows"

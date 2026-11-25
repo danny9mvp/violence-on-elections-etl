@@ -4,13 +4,13 @@ from decimal import Decimal
 
 from sqlalchemy import func, select
 
+from violence_etl.db.models.gold_crimes_by_calendar import GoldCrimesByCalendar
 from violence_etl.db.models.gold_crimes_by_department import GoldCrimesByDepartment
 from violence_etl.db.models.gold_crimes_by_electoral_period import GoldCrimesByElectoralPeriod
 from violence_etl.db.models.gold_top_50_departments import GoldTop5Departments
 from violence_etl.db.models.silver_crimes import SilverCrimes
 from violence_etl.transformations.bronze import ingest_bronze
 from violence_etl.transformations.gold import build_gold
-from violence_etl.db.models.gold_crimes_by_calendar import GoldCrimesByCalendar
 from violence_etl.transformations.silver import build_silver
 
 

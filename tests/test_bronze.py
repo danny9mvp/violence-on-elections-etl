@@ -5,11 +5,11 @@ import os
 import pytest
 from sqlalchemy import func, select
 
-from violence_etl.transformations.bronze import ingest_bronze
-from violence_etl.exceptions.schema_exception import SchemaException
-from violence_etl.utils.io import read_csv, sha256_file
 from violence_etl.db.models.bronze_crimes_raw import BronzeCrimesRaw
 from violence_etl.db.models.bronze_ingestion_log import BronzeIngestionLog
+from violence_etl.exceptions.schema_exception import SchemaException
+from violence_etl.transformations.bronze import ingest_bronze
+from violence_etl.utils.io import read_csv, sha256_file
 from violence_etl.utils.schema import EXPECTED_HEADER, validate_header
 
 

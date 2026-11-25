@@ -1,5 +1,7 @@
+from sqlalchemy import Column, Integer, PrimaryKeyConstraint, String
+
 from violence_etl.db.models.base_model import Base
-from sqlalchemy import Column, Integer, String, PrimaryKeyConstraint
+
 
 class GoldCrimesByCalendar(Base):
     __tablename__ = "gold_crimes_by_calendar"
