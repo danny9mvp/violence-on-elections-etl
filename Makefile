@@ -1,23 +1,33 @@
 PYTHON ?= .venv/bin/python
-CLI = $(PYTHON) -m violence_etl.cli
+PYTHONPATH ?= src
+CLI = PYTHONPATH=$(PYTHONPATH) $(PYTHON) -m violence_etl.cli
+PYTEST = PYTHONPATH=$(PYTHONPATH) $(PYTHON) -m pytest
+RUFF = $(PYTHON) -m ruff
+FIXTURE_CSV ?= tests/fixtures/yi5j-5fe9_sample.csv
+CI_TMP_DIR ?= $(or $(TMPDIR),/tmp)/violence-etl-ci
+CI_DB_PATH ?= $(CI_TMP_DIR)/warehouse/violence_ci.db
+CI_BRONZE_DIR ?= $(CI_TMP_DIR)/bronze
 
-.PHONY: install test lint init-db run-all sqlite-run
+.PHONY: install test test-cov lint init-db drop-db run-all sqlite-run ci-validate
 
 install:
 	$(PYTHON) -m pip install --upgrade pip
 	$(PYTHON) -m pip install -r requirements-dev.txt
 
 test:
-	$(PYTHON) -m pytest tests -q
+	$(PYTEST) tests -q
+
+test-cov:
+	$(PYTEST) tests -q --cov=violence_etl --cov-report=term-missing --cov-report=xml --cov-fail-under=80
 
 lint:
-	$(PYTHON) -m ruff check .
+	$(RUFF) check .
 
 init-db:
 	$(CLI) init-db
 
 drop-db:
-    $(CLI) drop-db
+	$(CLI) drop-db
 
 run-all:
 	$(CLI) run-all
@@ -25,3 +35,16 @@ run-all:
 sqlite-run:
 	ENV=DEV ETL_SQLITE_PATH=data/warehouse/violence_staging.db $(CLI) init-db
 	ENV=DEV ETL_SQLITE_PATH=data/warehouse/violence_staging.db $(CLI) run-all
+
+ci-validate:
+	@case "$(CI_TMP_DIR)" in \
+		""|"/"|"/."|"/.."|"/tmp"|"/var/tmp") \
+			echo "CI_TMP_DIR must be a non-root absolute temp path outside /tmp and /var/tmp: $(CI_TMP_DIR)" >&2; exit 1 ;; \
+		/*) ;; \
+		*) echo "CI_TMP_DIR must be an absolute path: $(CI_TMP_DIR)" >&2; exit 1 ;; \
+	esac
+	rm -rf "$(CI_TMP_DIR)"
+	mkdir -p "$(CI_TMP_DIR)/warehouse" "$(CI_BRONZE_DIR)"
+	ENV=TEST ETL_SQLITE_PATH="$(CI_DB_PATH)" ETL_BRONZE_DIR="$(CI_BRONZE_DIR)" $(CLI) init-db
+	ENV=TEST ETL_SQLITE_PATH="$(CI_DB_PATH)" ETL_BRONZE_DIR="$(CI_BRONZE_DIR)" $(CLI) run-all --csv-path "$(FIXTURE_CSV)"
+	ENV=TEST ETL_SQLITE_PATH="$(CI_DB_PATH)" ETL_BRONZE_DIR="$(CI_BRONZE_DIR)" $(CLI) validate
