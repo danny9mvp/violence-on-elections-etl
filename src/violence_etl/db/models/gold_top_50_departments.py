@@ -1,5 +1,7 @@
+from sqlalchemy import Column, Integer, String
+
 from violence_etl.db.models.base_model import Base
-from sqlalchemy import Column, Integer, String, Text, DateTime
+
 
 class GoldTop5Departments(Base):
     __tablename__ = "gold_top5_departments"

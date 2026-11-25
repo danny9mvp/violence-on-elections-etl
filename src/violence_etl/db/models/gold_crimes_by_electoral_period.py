@@ -1,5 +1,7 @@
+from sqlalchemy import Column, Integer, Numeric, String
+
 from violence_etl.db.models.base_model import Base
-from sqlalchemy import Column, Integer, String, Numeric
+
 
 class GoldCrimesByElectoralPeriod(Base):
     __tablename__ = "gold_crimes_by_electoral_period"

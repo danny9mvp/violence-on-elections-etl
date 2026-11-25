@@ -1,5 +1,6 @@
+from sqlalchemy import Column, DateTime, Integer, String, Text, UniqueConstraint
+
 from violence_etl.db.models.base_model import Base
-from sqlalchemy import Column, Integer, String, Text, DateTime, UniqueConstraint
 
 
 class BronzeCrimesRaw(Base):
