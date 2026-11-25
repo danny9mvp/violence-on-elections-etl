@@ -28,7 +28,9 @@ jobs:
         with:
           python-version: '3.12'
           cache: 'pip'
-          cache-dependency-path: requirements-dev.txt
+          cache-dependency-path: |
+            requirements-dev.txt
+            requirements.txt
 
       - name: Install dependencies
         run: |
@@ -50,7 +52,9 @@ jobs:
         with:
           python-version: '3.12'
           cache: 'pip'
-          cache-dependency-path: requirements-dev.txt
+          cache-dependency-path: |
+            requirements-dev.txt
+            requirements.txt
 
       - name: Install dependencies
         run: |
@@ -79,7 +83,9 @@ jobs:
         with:
           python-version: '3.12'
           cache: 'pip'
-          cache-dependency-path: requirements-dev.txt
+          cache-dependency-path: |
+            requirements-dev.txt
+            requirements.txt
 
       - name: Install dependencies
         run: |
@@ -134,6 +140,7 @@ jobs:
               sys.exit(1)
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
               fh.write(f"version={version}\n")
+              fh.write(f"repository={repo}\n")
           PY
 
       - name: Set up Docker Buildx
@@ -150,4 +157,4 @@ jobs:
         with:
           context: .
           push: true
-          tags: ${{ vars.DOCKERHUB_REPOSITORY }}:${{ steps.semver.outputs.version }}
+          tags: ${{ steps.semver.outputs.repository }}:${{ steps.semver.outputs.version }}

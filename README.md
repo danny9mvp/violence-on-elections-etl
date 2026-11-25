@@ -570,8 +570,10 @@ Required GitHub repository settings (names only, no values):
 
 Merge blocking requires GitHub branch protection or repository rulesets that
 require the CI status checks. Workflow failures alone do not block merges.
-Configure required checks for the jobs used by this workflow (for example
-`lint`, `test`, and `pipeline-validate`).
+Required status check names must match the workflow/job check names exactly as
+they appear in GitHub for this workflow: `CI / lint`, `CI / test`, and
+`CI / pipeline-validate`. Configure those exact checks in branch protection or
+rulesets for `develop` and `main`.
 
 Local reproduction commands:
 

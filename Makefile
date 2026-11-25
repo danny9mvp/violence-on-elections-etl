@@ -37,6 +37,12 @@ sqlite-run:
 	ENV=DEV ETL_SQLITE_PATH=data/warehouse/violence_staging.db $(CLI) run-all
 
 ci-validate:
+	@case "$(CI_TMP_DIR)" in \
+		""|"/"|"/."|"/.."|"/tmp"|"/var/tmp") \
+			echo "CI_TMP_DIR must be a non-root absolute temp path outside /tmp and /var/tmp: $(CI_TMP_DIR)" >&2; exit 1 ;; \
+		/*) ;; \
+		*) echo "CI_TMP_DIR must be an absolute path: $(CI_TMP_DIR)" >&2; exit 1 ;; \
+	esac
 	rm -rf "$(CI_TMP_DIR)"
 	mkdir -p "$(CI_TMP_DIR)/warehouse" "$(CI_BRONZE_DIR)"
 	ENV=TEST ETL_SQLITE_PATH="$(CI_DB_PATH)" ETL_BRONZE_DIR="$(CI_BRONZE_DIR)" $(CLI) init-db
