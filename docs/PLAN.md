@@ -794,15 +794,20 @@ This section records outstanding issues and backlog follow-ups from containeriza
    Affected areas: project layout and packaging metadata (`pyproject.toml`/package discovery), CLI/docs/notebooks/dev workflows, possibly CI and tooling config.
    Follow-up: evaluate editable install/packaging or layout adjustment so `violence_etl` resolves without manual `PYTHONPATH`.
 
-5. Makefile commands broken with current layout (backlog).
-   Context: for example `make test` fails with `ModuleNotFoundError: No module named 'violence_etl'` (`from violence_etl.db.connection import make_engine`).
+5. Makefile commands broken with current layout (resolved).
+   Context: `make test` previously failed with `ModuleNotFoundError: No module named 'violence_etl'` because Makefile targets did not set `PYTHONPATH` for the `src/` layout.
    Affected areas: `Makefile` targets (`test`, `lint`, `init-db`, `run-all`, `sqlite-run`, `drop-db`), package resolution/setup, developer docs.
-   Follow-up: align Makefile targets with package resolution (PYTHONPATH or install) and existing CLI usage.
+   Resolution: Makefile now defaults `PYTHONPATH ?= src`, exposes `PYTHON` override for CI (`make ... PYTHON=python`), adds `test-cov` and deterministic `ci-validate`, fixes `drop-db` tab indentation, and keeps existing local targets working. GitHub Actions CI uses these targets.
 
 6. Lint baseline and import ordering (resolved).
    Context: `make lint` previously reported 28 existing ruff errors, mostly unsorted import blocks and missing trailing newlines.
    Affected areas: codebase-wide Python modules, `pyproject.toml`/ruff-isort configuration, CI/dev lint workflow.
    Resolution: fixed the import ordering/newline issues with `ruff check . --fix`, confirmed `ruff check .` passes cleanly, and kept behavior unchanged (test suite still passing).
+
+10. GitHub Actions CI/CD (resolved by 0004).
+    Context: the project needed automated lint, coverage, deterministic fixture validation, and controlled Docker publishing.
+    Affected areas: `.github/workflows/ci.yml`, `Makefile`, `pyproject.toml`, `README.md`, CI operations/secrets/variables.
+    Resolution: added CI workflow with `push`/`pull_request` triggers (`develop`, `main`, `feat/**`, `hotfix/**` / PRs to `develop`,`main`), `ruff` lint gate, `pytest-cov` with `--cov-fail-under=80` and `coverage.xml` artifact, deterministic `ci-validate` using committed fixture and temp SQLite/bronze paths, and a `docker-publish` job gated on validation success and `push` to `main`. Publish uses `DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN` secrets and required `DOCKERHUB_REPOSITORY` variable, resolves semver from `pyproject.toml [project].version`, and pushes only `DOCKERHUB_REPOSITORY:<semver>` (no `:latest`). Branch protection/rulesets remain an operational requirement for merge blocking.
 
 7. Dependency footprint review (backlog).
    Context: runtime and dev dependency sets should stay lean without breaking PROD/DEV workflows.

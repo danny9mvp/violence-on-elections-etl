@@ -539,20 +539,76 @@ Each notebook bootstrap sets `ENV=DEV` so it uses the local SQLite database and
 never touches PostgreSQL. The notebook stack lives in `requirements-dev.txt`.
 See `notebooks/README.md` for the notebook list and prerequisites.
 
+## CI/CD (GitHub Actions)
+
+The workflow `.github/workflows/ci.yml` runs on:
+
+- `push` to `develop`, `main`, `feat/**`, and `hotfix/**`
+- `pull_request` targeting `develop` and `main`
+
+Required validation jobs:
+
+- `lint`: `make lint PYTHON=python` (`ruff check .`)
+- `test`: `make test-cov PYTHON=python` with `--cov-fail-under=80`, terminal
+  coverage summary, and `coverage.xml` uploaded as the `coverage-xml` artifact
+- `pipeline-validate`: `make ci-validate PYTHON=python`, which runs deterministic
+  fixture validation with `ENV=TEST`, clean temporary SQLite DB and bronze paths,
+  and the committed fixture `tests/fixtures/yi5j-5fe9_sample.csv` through
+  `init-db`, `run-all --csv-path ...`, and `validate` (no external download)
+
+Docker publish runs only on `push` to `main` and only after `lint`, `test`, and
+`pipeline-validate` succeed. It resolves semver from `pyproject.toml`
+`[project].version`, fails fast if that version is missing/empty/invalid, fails
+fast if the GitHub repository variable `DOCKERHUB_REPOSITORY` is missing/empty,
+logs in with GitHub secrets `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`, and
+pushes only `DOCKERHUB_REPOSITORY:<semver>`. No `:latest` tag is published.
+
+Required GitHub repository settings (names only, no values):
+
+- Secrets: `DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN`
+- Variable: `DOCKERHUB_REPOSITORY`
+
+Merge blocking requires GitHub branch protection or repository rulesets that
+require the CI status checks. Workflow failures alone do not block merges.
+Configure required checks for the jobs used by this workflow (for example
+`lint`, `test`, and `pipeline-validate`).
+
+Local reproduction commands:
+
+```
+make lint PYTHON=python
+make test-cov PYTHON=python
+make ci-validate PYTHON=python
+```
+
 ## Makefile
 
+The Makefile defaults to `PYTHON ?= .venv/bin/python` and `PYTHONPATH ?= src`.
+CI overrides with `PYTHON=python`. Targets that invoke the package/tests set
+`PYTHONPATH` explicitly.
+
 - `make install`: upgrade pip and install `requirements-dev.txt`.
-- `make test`: `python -m pytest tests -q`.
-- `make lint`: `python -m ruff check .`.
+- `make lint`: `ruff check .`.
+- `make test`: `pytest tests -q`.
+- `make test-cov`: pytest with coverage for `violence_etl`,
+  `--cov-fail-under=80`, terminal missing summary, and `coverage.xml`.
+- `make ci-validate`: deterministic fixture validation in a clean temp area
+  (`CI_TMP_DIR`, default `${TMPDIR:-/tmp}/violence-etl-ci`, overridable). It runs
+  `init-db`, `run-all --csv-path tests/fixtures/yi5j-5fe9_sample.csv`, and
+  `validate` with `ENV=TEST` and temp `ETL_SQLITE_PATH`/`ETL_BRONZE_DIR`.
 - `make init-db`: `python -m violence_etl.cli init-db`.
+- `make drop-db`: `python -m violence_etl.cli drop-db`.
 - `make run-all`: `python -m violence_etl.cli run-all`.
 - `make sqlite-run`: `init-db` then `run-all` against
   `data/warehouse/violence_staging.db` with `ENV=DEV`.
 
-The CLI targets invoke `python -m violence_etl.cli` directly. With the current
-`src/` layout (no editable install), run them with `PYTHONPATH=src` in the
-environment, for example `PYTHONPATH=src make sqlite-run`, or use the explicit
-CLI commands shown above.
+Examples:
+
+```
+make lint PYTHON=python
+make test-cov PYTHON=.venv/bin/python
+PYTHONPATH=src make sqlite-run
+```
 
 ## Troubleshooting
 
